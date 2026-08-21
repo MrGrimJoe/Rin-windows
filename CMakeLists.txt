@@ -5,16 +5,49 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # --- Dependencies -----------------------------------------------------
+#
+# asio and nlohmann_json are both header-only, so instead of vendoring
+# full source trees in third_party/ (which is what was blowing past
+# GitHub's web-upload size limit -- the vendored asio checkout alone was
+# ~7MB of autotools/docs/tests we never touch), CMake downloads pinned
+# versions at configure time and caches them under build/_deps. Nothing
+# dependency-related lives in git anymore.
+#
+# First configure needs network access; after that CMake reuses the
+# build/_deps cache, so offline rebuilds work fine.
 
-# Standalone Asio (header-only, no Boost). Vendored under third_party/
-# per the doc's tech stack choice (§08). If you'd rather use a system
-# package or vcpkg/Conan on the real Windows box, point ASIO_INCLUDE_DIR
-# at it instead of relying on the vendored copy.
-set(ASIO_INCLUDE_DIR "${CMAKE_SOURCE_DIR}/third_party/asio/asio/include"
-    CACHE PATH "Path to standalone Asio's include/ directory")
+include(FetchContent)
+
+FetchContent_Declare(
+    asio
+    GIT_REPOSITORY https://github.com/chriskohlhoff/asio.git
+    GIT_TAG        asio-1-30-2
+    GIT_SHALLOW    TRUE
+)
+
+FetchContent_Declare(
+    nlohmann_json
+    GIT_REPOSITORY https://github.com/nlohmann/json.git
+    GIT_TAG        v3.11.3
+    GIT_SHALLOW    TRUE
+)
+
+# asio has no CMakeLists.txt for the standalone header-only library (only
+# for its own tests/examples), so don't add_subdirectory it -- just pull
+# the source down and point an interface target at its include/ dir.
+FetchContent_GetProperties(asio)
+if(NOT asio_POPULATED)
+    FetchContent_Populate(asio)
+endif()
+add_library(asio_headers INTERFACE)
+target_include_directories(asio_headers INTERFACE "${asio_SOURCE_DIR}/asio/include")
+
+# nlohmann_json ships a proper CMakeLists.txt and defines the
+# nlohmann_json::nlohmann_json target itself once fetched.
+set(JSON_BuildTests OFF CACHE INTERNAL "")
+FetchContent_MakeAvailable(nlohmann_json)
 
 find_package(OpenSSL REQUIRED)
-find_package(nlohmann_json 3.9 REQUIRED)
 
 # QR generation. libqrencode ships without a CMake config on most distros
 # (including this build environment), so it's located manually rather than
@@ -42,7 +75,6 @@ add_library(rin_core STATIC
 
 target_include_directories(rin_core PUBLIC
     include
-    ${ASIO_INCLUDE_DIR}
     ${QRENCODE_INCLUDE_DIR}
 )
 
@@ -52,6 +84,7 @@ target_compile_definitions(rin_core PUBLIC
 )
 
 target_link_libraries(rin_core PUBLIC
+    asio_headers
     OpenSSL::SSL
     OpenSSL::Crypto
     nlohmann_json::nlohmann_json
