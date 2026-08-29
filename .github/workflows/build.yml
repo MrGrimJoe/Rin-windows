@@ -1,0 +1,121 @@
+name: Build and Package Rin (Windows)
+
+# This is the first time Rin-windows has ever gone through an actual
+# compile (per DESIGN_NOTES.md/README.md, RinWindows.exe was written
+# against the Win32/WinRT API directly but never built against a real
+# Windows SDK/MSVC). Treat a red run here as genuinely new information,
+# not a CI misconfiguration -- same situation as TOKI's installer.iss
+# initially having an uncaught Pascal Script bug.
+#
+# Builds against vcpkg's x64-windows-static triplet with a statically
+# linked MSVC CRT (/MT), specifically so RinWindows.exe ends up fully
+# self-contained -- no OpenSSL/libqrencode/vcruntime DLLs to bundle or
+# chase down in the installer. GitHub's windows-latest runners ship
+# vcpkg preinstalled; $env:VCPKG_INSTALLATION_ROOT is the documented way
+# to find it, since the exact path has changed between runner images.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "**.cpp"
+      - "**.h"
+      - "**.hpp"
+      - "CMakeLists.txt"
+      - "tests/CMakeLists.txt"
+      - "installer.iss"
+      - ".github/workflows/build.yml"
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      publish_release:
+        description: "Also attach the built installer to a GitHub Release"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Install vcpkg dependencies (static triplet)
+        shell: pwsh
+        run: |
+          & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install `
+            openssl:x64-windows-static `
+            libqrencode:x64-windows-static
+
+      # ZXing is intentionally not installed here -- CMakeLists.txt/
+      # tests/CMakeLists.txt both treat it as optional and skip the
+      # ZXing-dependent parts (camera QR scanning, one round-trip test)
+      # when it's not found, per their own comments.
+
+      - name: Configure (static CRT + static vcpkg triplet)
+        shell: pwsh
+        run: |
+          cmake -B build -A x64 `
+            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT\scripts\buildsystems\vcpkg.cmake" `
+            -DVCPKG_TARGET_TRIPLET=x64-windows-static `
+            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
+
+      - name: Build (Release)
+        shell: pwsh
+        run: cmake --build build --config Release -j
+
+      - name: Run test suite
+        shell: pwsh
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Verify expected executables exist
+        shell: pwsh
+        run: |
+          foreach ($exe in "build\Release\RinWindows.exe", "build\Release\rin-console.exe") {
+            if (-not (Test-Path $exe)) {
+              Write-Error "$exe was not produced -- check the build log above."
+              exit 1
+            }
+          }
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup --no-progress -y
+
+      - name: Compile installer.iss
+        shell: pwsh
+        run: |
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "installer.iss"
+
+      - name: Locate compiled installer
+        id: out
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem -Path "dist" -Filter "Rin-Setup-*.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $exe) {
+            Write-Error "No Rin-Setup-*.exe found in dist\ -- check the ISCC log above."
+            exit 1
+          }
+          echo "path=$($exe.FullName)" >> $env:GITHUB_OUTPUT
+          echo "name=$($exe.Name)" >> $env:GITHUB_OUTPUT
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ steps.out.outputs.name }}
+          path: ${{ steps.out.outputs.path }}
+          retention-days: 30
+
+      - name: Publish GitHub Release
+        if: github.event_name == 'workflow_dispatch' && inputs.publish_release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: v1.0.0-${{ github.run_number }}
+          name: Rin (Windows) build ${{ github.run_number }}
+          files: ${{ steps.out.outputs.path }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
