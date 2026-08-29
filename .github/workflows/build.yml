@@ -10,9 +10,9 @@ name: Build and Package Rin (Windows)
 # Builds against vcpkg's x64-windows-static triplet with a statically
 # linked MSVC CRT (/MT), specifically so RinWindows.exe ends up fully
 # self-contained -- no OpenSSL/libqrencode/vcruntime DLLs to bundle or
-# chase down in the installer. GitHub's windows-latest runners ship
-# vcpkg preinstalled; $env:VCPKG_INSTALLATION_ROOT is the documented way
-# to find it, since the exact path has changed between runner images.
+# chase down in the installer. Bootstraps its own vcpkg checkout rather
+# than using whatever's pre-installed on the runner (see the Bootstrap
+# vcpkg step for why).
 
 on:
   push:
@@ -44,10 +44,23 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v5
 
+      - name: Bootstrap vcpkg
+        shell: pwsh
+        run: |
+          # Not using the runner's pre-installed vcpkg: VCPKG_INSTALLATION_ROOT
+          # has a documented history of pointing at different things across
+          # runner image versions -- sometimes a plain C:\vcpkg, sometimes the
+          # MSVC-bundled copy under "Program Files", which doesn't support
+          # classic-mode `vcpkg install` the same way (see
+          # actions/runner-images#9269). Cloning our own avoids depending on
+          # whichever one happens to be there.
+          git clone https://github.com/microsoft/vcpkg.git "$env:GITHUB_WORKSPACE\vcpkg-ci"
+          & "$env:GITHUB_WORKSPACE\vcpkg-ci\bootstrap-vcpkg.bat"
+
       - name: Install vcpkg dependencies (static triplet)
         shell: pwsh
         run: |
-          & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install `
+          & "$env:GITHUB_WORKSPACE\vcpkg-ci\vcpkg.exe" install `
             openssl:x64-windows-static `
             libqrencode:x64-windows-static
 
@@ -60,7 +73,7 @@ jobs:
         shell: pwsh
         run: |
           cmake -B build -A x64 `
-            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT\scripts\buildsystems\vcpkg.cmake" `
+            -DCMAKE_TOOLCHAIN_FILE="$env:GITHUB_WORKSPACE\vcpkg-ci\scripts\buildsystems\vcpkg.cmake" `
             -DVCPKG_TARGET_TRIPLET=x64-windows-static `
             -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
 
