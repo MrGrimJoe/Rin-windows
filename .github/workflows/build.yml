@@ -70,12 +70,33 @@ jobs:
       # when it's not found, per their own comments.
 
       - name: Configure (static CRT + static vcpkg triplet)
+        id: cmake_configure
         shell: pwsh
+        continue-on-error: true
         run: |
           cmake -B build -A x64 `
             -DCMAKE_TOOLCHAIN_FILE="$env:GITHUB_WORKSPACE\vcpkg-ci\scripts\buildsystems\vcpkg.cmake" `
             -DVCPKG_TARGET_TRIPLET=x64-windows-static `
-            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
+            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded *>&1 | Tee-Object -FilePath cmake_configure_output.log
+          exit $LASTEXITCODE
+
+      - name: Commit configure log on failure (self-diagnosing)
+        if: steps.cmake_configure.outcome == 'failure'
+        shell: pwsh
+        run: |
+          git config user.email "ci@github-actions.local"
+          git config user.name "GitHub Actions CI"
+          git fetch origin ci-debug-logs 2>$null
+          git checkout -B ci-debug-logs
+          Copy-Item cmake_configure_output.log "cmake-configure-run$env:GITHUB_RUN_NUMBER.log"
+          git add "cmake-configure-run$env:GITHUB_RUN_NUMBER.log"
+          git commit -m "CI debug log: CMake configure failure, run $env:GITHUB_RUN_NUMBER"
+          git push origin ci-debug-logs --force
+
+      - name: Fail the job if configure actually failed
+        if: steps.cmake_configure.outcome == 'failure'
+        shell: pwsh
+        run: exit 1
 
       - name: Build (Release)
         shell: pwsh
