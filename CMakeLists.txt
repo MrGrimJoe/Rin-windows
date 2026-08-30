@@ -51,12 +51,30 @@ else()
     if(NOT sqlite3_POPULATED)
         FetchContent_Populate(sqlite3)
     endif()
-    add_library(sqlite3_lib STATIC "${sqlite3_SOURCE_DIR}/sqlite3.c")
-    target_include_directories(sqlite3_lib PUBLIC "${sqlite3_SOURCE_DIR}")
+
+    # ${sqlite3_SOURCE_DIR}/sqlite3.c assumed the amalgamation zip extracts
+    # flat -- it doesn't. sqlite.org's zip has its own top-level folder
+    # (e.g. sqlite-amalgamation-3450100/sqlite3.c), and FetchContent_Populate
+    # doesn't strip that the way some other archive tools do. That mismatch
+    # left sqlite3_lib with zero real source files, which is why CMake
+    # couldn't even determine a linker language for it. Glob for the real
+    # path instead of assuming a fixed layout, so this survives sqlite.org
+    # changing how a future amalgamation zip is laid out too.
+    file(GLOB_RECURSE _sqlite3_c_candidates "${sqlite3_SOURCE_DIR}/sqlite3.c")
+    list(LENGTH _sqlite3_c_candidates _sqlite3_c_count)
+    if(_sqlite3_c_count EQUAL 0)
+        message(FATAL_ERROR "sqlite3.c not found anywhere under ${sqlite3_SOURCE_DIR} -- "
+            "the amalgamation zip's layout may have changed.")
+    endif()
+    list(GET _sqlite3_c_candidates 0 _sqlite3_c_file)
+    get_filename_component(_sqlite3_dir "${_sqlite3_c_file}" DIRECTORY)
+
+    add_library(sqlite3_lib STATIC "${_sqlite3_c_file}")
+    target_include_directories(sqlite3_lib PUBLIC "${_sqlite3_dir}")
     if(UNIX)
         target_link_libraries(sqlite3_lib PUBLIC ${CMAKE_DL_LIBS})
     endif()
-    message(STATUS "Using fetched SQLite3 amalgamation")
+    message(STATUS "Using fetched SQLite3 amalgamation: ${_sqlite3_c_file}")
 endif()
 
 # --- libqrencode -------------------------------------------------------
@@ -170,3 +188,4 @@ if(RIN_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
 endif()
+
