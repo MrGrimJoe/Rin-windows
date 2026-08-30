@@ -5,6 +5,14 @@
 #include <iostream>
 
 #ifdef _WIN32
+// Without these, <windows.h> defaults to pulling in the old <winsock.h>,
+// which conflicts with asio's <winsock2.h> in this same translation unit
+// (MeshEngine sits on top of TcpTransport, which uses asio) -- exactly
+// the C1189 "WinSock.h has already been included" error this caused.
+// main_gui.cpp and win32_shell.cpp already do this correctly; this file
+// was the one that missed it.
+#define NOMINMAX
+#define WIN32_LEAN_AND_MEAN
 #include <shellapi.h>
 #include <windows.h>
 #endif
