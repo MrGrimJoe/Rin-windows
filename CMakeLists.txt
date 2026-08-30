@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(RinWindows VERSION 1.0.0 LANGUAGES CXX)
+project(RinWindows VERSION 1.0.0 LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -70,13 +70,20 @@ else()
     get_filename_component(_sqlite3_dir "${_sqlite3_c_file}" DIRECTORY)
 
     add_library(sqlite3_lib STATIC "${_sqlite3_c_file}")
-    # CMake was still failing with "can not determine linker language" at
-    # the Generate step even after the glob fix above found the real file
-    # (confirmed: "Using fetched SQLite3 amalgamation: .../sqlite3.c"
-    # printed the correct path, and Configure itself reported success).
-    # That late-stage-only failure is CMake's documented language-detection
-    # quirk for FetchContent-populated single-source targets -- setting
-    # this explicitly sidesteps it regardless of the underlying cause.
+    # ROOT CAUSE (finally): project() at the top of this file only declared
+    # LANGUAGES CXX, never C. sqlite3.c is a C file. Without C enabled at
+    # the project() level, the Visual Studio generator has no C toolset
+    # registered at all, so it silently produces a malformed/incomplete
+    # sqlite3_lib.vcxproj -- not excluded, not misordered, just never a
+    # real, buildable project. That's why it never appeared ANYWHERE in a
+    # full build log (no "Building Custom Rule", no compile line, nothing)
+    # regardless of add_dependencies() or EXCLUDE_FROM_ALL, which both
+    # assume the target is otherwise valid and just needs sequencing/
+    # inclusion -- neither can fix a generator-level toolset gap. The real
+    # fix is `project(RinWindows VERSION 1.0.0 LANGUAGES CXX C)` above.
+    # LINKER_LANGUAGE C and EXCLUDE_FROM_ALL FALSE below are now likely
+    # redundant given that fix, but left in place as harmless belt-and-
+    # suspenders rather than risk removing something and reopening a gap.
     set_target_properties(sqlite3_lib PROPERTIES LINKER_LANGUAGE C)
     # add_dependencies(<consumer> sqlite3_lib) on rin_console/rin_tests/
     # RinWindows was NOT enough on its own -- confirmed by grepping a full
