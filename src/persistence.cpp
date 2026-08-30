@@ -9,6 +9,10 @@
 #include "rin/protocol.hpp"
 
 #ifdef _WIN32
+// See mesh_engine.cpp for why these two defines have to come first --
+// same WinSock conflict, same fix.
+#define NOMINMAX
+#define WIN32_LEAN_AND_MEAN
 #include <shlobj.h>
 #include <windows.h>
 #else
