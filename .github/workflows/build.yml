@@ -84,14 +84,22 @@ jobs:
         if: steps.cmake_configure.outcome == 'failure'
         shell: pwsh
         run: |
+          # No .gitignore here so this wasn't the bug on this repo, but
+          # PowerShell steps in GH Actions don't fail on a nonzero exit
+          # code from an external command unless you check it yourself --
+          # confirmed that silently ate a failure on BlazEng's equivalent
+          # step, so checking every git call explicitly here too.
           git config user.email "ci@github-actions.local"
           git config user.name "GitHub Actions CI"
           git fetch origin ci-debug-logs 2>$null
           git checkout -B ci-debug-logs
           Copy-Item cmake_configure_output.log "cmake-configure-run$env:GITHUB_RUN_NUMBER.log"
-          git add "cmake-configure-run$env:GITHUB_RUN_NUMBER.log"
+          git add -f "cmake-configure-run$env:GITHUB_RUN_NUMBER.log"
+          if ($LASTEXITCODE -ne 0) { Write-Error "git add failed"; exit 1 }
           git commit -m "CI debug log: CMake configure failure, run $env:GITHUB_RUN_NUMBER"
+          if ($LASTEXITCODE -ne 0) { Write-Error "git commit failed"; exit 1 }
           git push origin ci-debug-logs --force
+          if ($LASTEXITCODE -ne 0) { Write-Error "git push failed"; exit 1 }
 
       - name: Fail the job if configure actually failed
         if: steps.cmake_configure.outcome == 'failure'
