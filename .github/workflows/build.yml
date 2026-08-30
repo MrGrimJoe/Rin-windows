@@ -107,8 +107,33 @@ jobs:
         run: exit 1
 
       - name: Build (Release)
+        id: cmake_build
         shell: pwsh
-        run: cmake --build build --config Release -j
+        continue-on-error: true
+        run: |
+          cmake --build build --config Release -j *>&1 | Tee-Object -FilePath cmake_build_output.log
+          exit $LASTEXITCODE
+
+      - name: Commit build log on failure (self-diagnosing)
+        if: steps.cmake_build.outcome == 'failure'
+        shell: pwsh
+        run: |
+          git config user.email "ci@github-actions.local"
+          git config user.name "GitHub Actions CI"
+          git fetch origin ci-debug-logs 2>$null
+          git checkout -B ci-debug-logs
+          Copy-Item cmake_build_output.log "cmake-build-run$env:GITHUB_RUN_NUMBER.log"
+          git add -f "cmake-build-run$env:GITHUB_RUN_NUMBER.log"
+          if ($LASTEXITCODE -ne 0) { Write-Error "git add failed"; exit 1 }
+          git commit -m "CI debug log: CMake build failure, run $env:GITHUB_RUN_NUMBER"
+          if ($LASTEXITCODE -ne 0) { Write-Error "git commit failed"; exit 1 }
+          git push origin ci-debug-logs --force
+          if ($LASTEXITCODE -ne 0) { Write-Error "git push failed"; exit 1 }
+
+      - name: Fail the job if build actually failed
+        if: steps.cmake_build.outcome == 'failure'
+        shell: pwsh
+        run: exit 1
 
       - name: Run test suite
         shell: pwsh
