@@ -120,8 +120,33 @@ add_library(rin_core STATIC
     src/audit_logger.cpp
     src/persistence.cpp
     src/file_transfer.cpp
-    src/camera_qr_scanner.cpp   # #ifdef _WIN32 inside; compiles as stub elsewhere
 )
+
+# camera_qr_scanner.cpp's #ifdef _WIN32 block #includes <ZXing/ReadBarcode.h>
+# unconditionally, with no RIN_HAVE_ZXING guard around the include itself
+# (only the surrounding logic was meant to be conditional, per the
+# ZXing-not-found message above already promising "camera QR scanner
+# disabled" -- the source list just never actually enforced that). Nothing
+# else in the codebase references CameraQrScanner, confirmed, so leaving it
+# out entirely when ZXing isn't available can't cause a link error --
+# it's simply not compiled in, matching what CMake already claims happens.
+if(HAVE_ZXING AND WIN32)
+    target_sources(rin_core PRIVATE src/camera_qr_scanner.cpp)
+    # C++/WinRT coroutines -- camera_qr_scanner.cpp is the only WinRT
+    # coroutine consumer in the codebase (confirmed, nothing else uses
+    # WinRT), so this only applies to that one file rather than forcing
+    # the deprecated-coroutine machinery onto the whole target. The newer
+    # MSVC toolset on GitHub's windows-latest runner hard-rejects
+    # <experimental/coroutine> with a static_assert (C2338/STL1011) unless
+    # the silence define is set -- Microsoft's own documented escape
+    # hatch, not a real fix. A full migration to std::coroutine (C++20)
+    # would be the real fix, but that's an actual code change to the
+    # WinRT async logic, not something to improvise here.
+    set_source_files_properties(src/camera_qr_scanner.cpp PROPERTIES
+        COMPILE_OPTIONS "/await"
+        COMPILE_DEFINITIONS "_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS"
+    )
+endif()
 
 target_include_directories(rin_core PUBLIC
     include
@@ -154,8 +179,6 @@ if(WIN32)
         # WinRT for camera scanner (Windows.Media.Capture.Frames)
         windowsapp
     )
-    # C++/WinRT coroutines
-    target_compile_options(rin_core PUBLIC /await)
 endif()
 
 if(UNIX)
