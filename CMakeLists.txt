@@ -212,6 +212,10 @@ if(WIN32)
         ${MANIFEST_FILE}
     )
     target_link_libraries(RinWindows PRIVATE rin_core comctl32)
+    # Same MSBuild/CMake gap as rin_console and rin_tests -- on the Windows
+    # Visual Studio generator, sqlite3_lib.vcxproj never gets invoked as a
+    # build step without an explicit add_dependencies() edge.
+    add_dependencies(RinWindows sqlite3_lib)
     # win32_shell.cpp already uses LVITEMW and to_wstring()/wide strings
     # throughout -- clearly Unicode-only by design -- but without this,
     # generic Win32 macros like ListView_SetItemText resolve to their ANSI
@@ -233,5 +237,3 @@ if(RIN_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
 endif()
-
-
