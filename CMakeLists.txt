@@ -78,6 +78,19 @@ else()
     # quirk for FetchContent-populated single-source targets -- setting
     # this explicitly sidesteps it regardless of the underlying cause.
     set_target_properties(sqlite3_lib PROPERTIES LINKER_LANGUAGE C)
+    # add_dependencies(<consumer> sqlite3_lib) on rin_console/rin_tests/
+    # RinWindows was NOT enough on its own -- confirmed by grepping a full
+    # build log and finding sqlite3_lib.vcxproj is never invoked at all, on
+    # any target, despite those add_dependencies() calls being present.
+    # add_dependencies() only orders builds among targets MSBuild already
+    # scheduled; it doesn't force a target that CMake left out of the
+    # default ALL_BUILD project into the build in the first place. Targets
+    # created via FetchContent_Populate() (rather than
+    # FetchContent_MakeAvailable(), which we can't use here because of the
+    # amalgamation zip's non-flat layout -- see the glob comment above) are
+    # not automatically added to ALL_BUILD on the Visual Studio generator.
+    # Explicitly un-excluding it is the actual fix.
+    set_target_properties(sqlite3_lib PROPERTIES EXCLUDE_FROM_ALL FALSE)
     target_include_directories(sqlite3_lib PUBLIC "${_sqlite3_dir}")
     if(UNIX)
         target_link_libraries(sqlite3_lib PUBLIC ${CMAKE_DL_LIBS})
