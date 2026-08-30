@@ -70,6 +70,14 @@ else()
     get_filename_component(_sqlite3_dir "${_sqlite3_c_file}" DIRECTORY)
 
     add_library(sqlite3_lib STATIC "${_sqlite3_c_file}")
+    # CMake was still failing with "can not determine linker language" at
+    # the Generate step even after the glob fix above found the real file
+    # (confirmed: "Using fetched SQLite3 amalgamation: .../sqlite3.c"
+    # printed the correct path, and Configure itself reported success).
+    # That late-stage-only failure is CMake's documented language-detection
+    # quirk for FetchContent-populated single-source targets -- setting
+    # this explicitly sidesteps it regardless of the underlying cause.
+    set_target_properties(sqlite3_lib PROPERTIES LINKER_LANGUAGE C)
     target_include_directories(sqlite3_lib PUBLIC "${_sqlite3_dir}")
     if(UNIX)
         target_link_libraries(sqlite3_lib PUBLIC ${CMAKE_DL_LIBS})
@@ -188,4 +196,5 @@ if(RIN_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
 endif()
+
 
