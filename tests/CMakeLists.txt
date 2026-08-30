@@ -7,6 +7,9 @@ add_executable(rin_tests
     test_file_transfer.cpp
 )
 target_link_libraries(rin_tests PRIVATE rin_core)
+# Same MSBuild/CMake gap fixed in the root CMakeLists.txt for rin_console --
+# sqlite3_lib.vcxproj never gets invoked as a build step without this.
+add_dependencies(rin_tests sqlite3_lib)
 
 # ZXing is used ONLY in tests, as an independent decoder to verify our QR
 # encoder actually produces scannable codes -- it is not a runtime
