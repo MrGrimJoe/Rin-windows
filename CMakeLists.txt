@@ -190,6 +190,14 @@ endif()
 add_executable(rin_console src/main.cpp)
 set_target_properties(rin_console PROPERTIES OUTPUT_NAME "rin-console")
 target_link_libraries(rin_console PRIVATE rin_core)
+# target_link_libraries above already declares the link requirement
+# correctly, but on the Windows/Visual Studio generator sqlite3_lib.vcxproj
+# (a FetchContent-populated single-source target) never actually got
+# invoked as a build step at all -- confirmed by grepping a full build log
+# for it, found zero occurrences, while rin_core's OTHER real dependencies
+# built fine. add_dependencies() forces the explicit build-order edge that
+# target_link_libraries alone wasn't producing for this specific target.
+add_dependencies(rin_console sqlite3_lib)
 
 # --- Rin Windows GUI (Windows-only) ------------------------------------
 if(WIN32)
@@ -204,6 +212,12 @@ if(WIN32)
         ${MANIFEST_FILE}
     )
     target_link_libraries(RinWindows PRIVATE rin_core comctl32)
+    # win32_shell.cpp already uses LVITEMW and to_wstring()/wide strings
+    # throughout -- clearly Unicode-only by design -- but without this,
+    # generic Win32 macros like ListView_SetItemText resolve to their ANSI
+    # (...A, LPSTR-based) variant instead of the intended Wide one, which
+    # is exactly the "cannot convert wchar_t* to LPSTR" errors this caused.
+    target_compile_definitions(RinWindows PRIVATE UNICODE _UNICODE)
 
     # Embed the manifest. CMake handles this automatically when the manifest
     # file is listed as a source with a .manifest extension.
