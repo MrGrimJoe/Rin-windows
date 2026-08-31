@@ -150,7 +150,13 @@ add_library(rin_core STATIC
 # else in the codebase references CameraQrScanner, confirmed, so leaving it
 # out entirely when ZXing isn't available can't cause a link error --
 # it's simply not compiled in, matching what CMake already claims happens.
-if(HAVE_ZXING AND WIN32)
+# camera_qr_scanner.cpp now has a real ZXing-optional fallback internally
+# (see the file itself) rather than needing to be excluded wholesale --
+# excluding it broke win32_shell.cpp's link instead (LNK2019, 4 unresolved
+# externals), since it directly constructs/calls CameraQrScanner regardless
+# of ZXing's availability. Missed checking win32_shell.cpp specifically
+# when this was first written -- only grepped main_gui/main/mesh_engine.
+if(WIN32)
     target_sources(rin_core PRIVATE src/camera_qr_scanner.cpp)
     # C++/WinRT coroutines -- camera_qr_scanner.cpp is the only WinRT
     # coroutine consumer in the codebase (confirmed, nothing else uses
@@ -161,7 +167,10 @@ if(HAVE_ZXING AND WIN32)
     # the silence define is set -- Microsoft's own documented escape
     # hatch, not a real fix. A full migration to std::coroutine (C++20)
     # would be the real fix, but that's an actual code change to the
-    # WinRT async logic, not something to improvise here.
+    # WinRT async logic, not something to improvise here. Needed
+    # regardless of ZXing's availability -- MediaCapture/MediaFrameReader
+    # are WinRT-coroutine-based either way, only the decode step itself
+    # needs ZXing.
     set_source_files_properties(src/camera_qr_scanner.cpp PROPERTIES
         COMPILE_OPTIONS "/await"
         COMPILE_DEFINITIONS "_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS"
