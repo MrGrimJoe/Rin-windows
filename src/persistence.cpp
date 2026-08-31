@@ -3,6 +3,7 @@
 #include <sqlite3.h>
 
 #include <cstdlib>
+#include <filesystem>
 #include <sstream>
 
 #include "rin/mesh_engine.hpp"
@@ -131,7 +132,7 @@ PersistenceStore::PersistenceStore(const std::string& db_path) : db_path_(db_pat
 }
 
 PersistenceStore::~PersistenceStore() {
-    if (db_) sqlite3_close(db_);
+    if (db_) sqlite3_close_v2(db_);
 }
 
 void PersistenceStore::apply_schema() {
@@ -288,24 +289,22 @@ void PersistenceStore::clear_all_devices() { exec_or_throw(db_, "DELETE FROM tru
 std::string PersistenceStore::default_db_path() {
 #ifdef _WIN32
     PWSTR path_wide = nullptr;
-    std::string result;
     if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_RoamingAppData, 0, nullptr, &path_wide))) {
-        int len = WideCharToMultiByte(CP_UTF8, 0, path_wide, -1, nullptr, 0, nullptr, nullptr);
-        std::string appdata(static_cast<size_t>(len) - 1, '\0');
-        WideCharToMultiByte(CP_UTF8, 0, path_wide, -1, appdata.data(), len, nullptr, nullptr);
+        std::filesystem::path base(path_wide);
         CoTaskMemFree(path_wide);
-        std::string dir = appdata + "\\Rin";
-        CreateDirectoryA(dir.c_str(), nullptr);  // ignore failure -- SQLite's own open error is the real signal
-        result = dir + "\\mesh.db";
-    } else {
-        result = "rin_mesh.db";  // last-resort fallback: current working directory
+        std::filesystem::path dir = base / "Rin";
+        std::error_code ec;
+        std::filesystem::create_directories(dir, ec);
+        return (dir / "mesh.db").string();
     }
-    return result;
+    return "rin_mesh.db";  // last-resort fallback: current working directory
 #else
     const char* home = std::getenv("HOME");
-    std::string dir = (home ? std::string(home) : ".") + "/.rin";
-    mkdir(dir.c_str(), 0700);  // ignore failure -- SQLite's own open error is the real signal
-    return dir + "/mesh.db";
+    std::filesystem::path base = home ? home : ".";
+    std::filesystem::path dir = base / ".rin";
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    return (dir / "mesh.db").string();
 #endif
 }
 

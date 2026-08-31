@@ -79,24 +79,28 @@ FileTransferEngine::FileTransferEngine(FileReceivedCallback on_received, PacketS
     : on_received_(std::move(on_received)), send_packet_(std::move(send_packet)) {}
 
 std::string FileTransferEngine::downloads_directory() {
-    std::string base;
 #ifdef _WIN32
     PWSTR path = nullptr;
     if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Downloads, 0, nullptr, &path))) {
-        int len = WideCharToMultiByte(CP_UTF8, 0, path, -1, nullptr, 0, nullptr, nullptr);
-        base.resize(static_cast<size_t>(len) - 1);
-        WideCharToMultiByte(CP_UTF8, 0, path, -1, base.data(), len, nullptr, nullptr);
+        std::filesystem::path base(path);
         CoTaskMemFree(path);
-    } else {
-        base = ".";
+        std::filesystem::path dir = base / "Rin Downloads";
+        std::error_code ec;
+        std::filesystem::create_directories(dir, ec);
+        return dir.string();
     }
+    std::filesystem::path dir = std::filesystem::path(".") / "Rin Downloads";
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    return dir.string();
 #else
     const char* home = std::getenv("HOME");
-    base = home ? std::string(home) + "/Downloads" : ".";
+    std::filesystem::path base = home ? (std::filesystem::path(home) / "Downloads") : std::filesystem::path(".");
+    std::filesystem::path dir = base / "Rin Downloads";
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    return dir.string();
 #endif
-    std::string dir = base + "/Rin Downloads";
-    std::filesystem::create_directories(dir);
-    return dir;
 }
 
 bool FileTransferEngine::send_file(const std::string& local_path, const TrustedDevice& target,

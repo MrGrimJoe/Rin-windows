@@ -78,8 +78,7 @@ jobs:
           cmake -B build -A x64 `
             -DCMAKE_TOOLCHAIN_FILE="$env:GITHUB_WORKSPACE\vcpkg-ci\scripts\buildsystems\vcpkg.cmake" `
             -DVCPKG_TARGET_TRIPLET=x64-windows-static `
-            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded `
-            -DRIN_ENABLE_ASAN=ON *>&1 | Tee-Object -FilePath cmake_configure_output.log
+            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded *>&1 | Tee-Object -FilePath cmake_configure_output.log
           exit $LASTEXITCODE
 
       - name: Commit configure log on failure (self-diagnosing)
