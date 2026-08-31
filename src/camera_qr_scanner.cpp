@@ -15,9 +15,16 @@
 #include <winrt/Windows.Graphics.Imaging.h>
 #include <winrt/Windows.Devices.Enumeration.h>
 
-// ZXing for QR decode -- same library used in the test suite.
+// ZXing for QR decode -- same library used in the test suite. Only needed
+// for the actual decode step inside start(); everything else here is pure
+// WinRT and builds fine without it. RIN_HAVE_ZXING is defined by
+// CMakeLists.txt only when ZXing was actually found (it's an optional
+// dependency, per the "camera QR scanner disabled" message it prints
+// otherwise).
+#ifdef RIN_HAVE_ZXING
 #include <ZXing/ReadBarcode.h>
 #include <ZXing/ImageView.h>
+#endif
 
 #include "rin/camera_qr_scanner.hpp"
 #include "rin/audit_logger.hpp"
@@ -50,6 +57,7 @@ CameraQrScanner::CameraQrScanner() : impl_(std::make_unique<Impl>()) {}
 
 CameraQrScanner::~CameraQrScanner() { stop(); }
 
+#ifdef RIN_HAVE_ZXING
 bool CameraQrScanner::start(QrScanCallback on_decoded) {
     if (running_.load()) return true;
 
@@ -204,6 +212,18 @@ bool CameraQrScanner::start(QrScanCallback on_decoded) {
         return false;
     }
 }
+#else
+bool CameraQrScanner::start(QrScanCallback) {
+    // Built without ZXing (optional dependency, not found at configure
+    // time -- see the "camera QR scanner disabled" message CMakeLists.txt
+    // already prints in that case). Camera-based scanning just isn't
+    // available in this build; callers fall back to manual token paste.
+    MeshAuditLogger::instance().log(AuditLevel::SecurityWarning, AuditCategory::Connection,
+                                      "CameraQrScanner: built without ZXing -- camera scanning "
+                                      "unavailable, use manual token paste");
+    return false;
+}
+#endif  // RIN_HAVE_ZXING
 
 void CameraQrScanner::stop() {
     if (!running_.exchange(false)) return;
