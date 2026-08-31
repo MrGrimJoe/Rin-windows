@@ -178,6 +178,21 @@ add_library(rin_core STATIC
     src/file_transfer.cpp
 )
 
+# Diagnostic-only: the rin_tests binary crashes with 0xc0000409
+# (STATUS_STACK_BUFFER_OVERRUN) on real Windows, and two separate manual
+# code-review passes over the whole obvious call chain (crypto.cpp,
+# audit_logger.cpp, mesh_engine.hpp) turned up nothing -- /GS only checks
+# the stack cookie at function RETURN, so the actual overwrite could be
+# happening in code that ran (and passed its own assertions) earlier.
+# AddressSanitizer catches this class of bug with a precise stack trace
+# instead of more guessing. Off by default (adds overhead, needs the ASan
+# runtime) -- opt in with -DRIN_ENABLE_ASAN=ON.
+option(RIN_ENABLE_ASAN "Build with MSVC AddressSanitizer (diagnostic use only)" OFF)
+if(RIN_ENABLE_ASAN AND MSVC)
+    target_compile_options(rin_core PUBLIC /fsanitize=address)
+    target_link_options(rin_core PUBLIC /fsanitize=address)
+endif()
+
 # camera_qr_scanner.cpp's #ifdef _WIN32 block #includes <ZXing/ReadBarcode.h>
 # unconditionally, with no RIN_HAVE_ZXING guard around the include itself
 # (only the surrounding logic was meant to be conditional, per the
