@@ -8,7 +8,7 @@
 
   <!-- Common Controls v6: themed ListView, buttons, progress bars.
        Without this the app draws Win95-era classic controls regardless
-       of Windows version. CRITICAL -- without it the ListView won't
+       of Windows version. CRITICAL: without it the ListView won't
        render correctly at all on Windows 10+. -->
   <dependency>
     <dependentAssembly>
