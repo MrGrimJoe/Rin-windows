@@ -4,8 +4,7 @@ name: Build and Package Rin (Windows)
 # compile (per DESIGN_NOTES.md/README.md, RinWindows.exe was written
 # against the Win32/WinRT API directly but never built against a real
 # Windows SDK/MSVC). Treat a red run here as genuinely new information,
-# not a CI misconfiguration -- same situation as TOKI's installer.iss
-# initially having an uncaught Pascal Script bug.
+# not a CI misconfiguration.
 #
 # Builds against vcpkg's x64-windows-static triplet with a statically
 # linked MSVC CRT (/MT), specifically so RinWindows.exe ends up fully
@@ -13,6 +12,18 @@ name: Build and Package Rin (Windows)
 # chase down in the installer. Bootstraps its own vcpkg checkout rather
 # than using whatever's pre-installed on the runner (see the Bootstrap
 # vcpkg step for why).
+#
+# LOGGING: all diagnostic logs (configure/build/test/ASan) are captured
+# with Tee-Object and uploaded as workflow run artifacts via
+# actions/upload-artifact with `if: always()`. This replaced an earlier
+# approach that committed logs to a shared `ci-debug-logs` git branch --
+# that approach had a real race (two jobs force-pushing the same branch
+# could silently clobber each other's log) and a real staging bug (the
+# "clean the branch to log-only" step deleted old files from disk but
+# never staged the deletion, so every commit re-added the whole source
+# tree). Artifacts are per-job, race-free by construction, and need no
+# custom retry/cleanup logic -- download them from the run's Summary
+# page under "Artifacts".
 
 on:
   push:
@@ -106,27 +117,24 @@ jobs:
           & "build_asan\tests\RelWithDebInfo\rin_tests.exe" *>&1 | Tee-Object -FilePath asan_run_output.log
           exit $LASTEXITCODE
 
-      - name: Commit ASan diagnostic logs
+      - name: Upload ASan diagnostic logs
         if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: asan-diagnostic-logs-run${{ github.run_number }}
+          path: |
+            asan_configure_output.log
+            asan_build_output.log
+            asan_run_output.log
+          if-no-files-found: ignore
+          retention-days: 30
+
+      - name: Fail the job if the ASan run itself failed
+        if: steps.asan_run.outcome == 'failure'
         shell: pwsh
         run: |
-          git config user.email "ci@github-actions.local"
-          git config user.name "GitHub Actions CI"
-          git fetch origin ci-debug-logs 2>$null
-          git checkout -B ci-debug-logs
-          $found = $false
-          foreach ($f in @("asan_configure_output.log", "asan_build_output.log", "asan_run_output.log")) {
-            if (Test-Path $f) {
-              Copy-Item $f "$f.run$env:GITHUB_RUN_NUMBER.log"
-              git add -f "$f.run$env:GITHUB_RUN_NUMBER.log"
-              $found = $true
-            }
-          }
-          if (-not $found) { Write-Host "No ASan logs produced -- nothing to commit."; exit 0 }
-          git commit -m "ASan diagnostic logs, run $env:GITHUB_RUN_NUMBER"
-          if ($LASTEXITCODE -ne 0) { Write-Error "git commit failed"; exit 1 }
-          git push origin ci-debug-logs --force
-          if ($LASTEXITCODE -ne 0) { Write-Error "git push failed"; exit 1 }
+          Write-Error "rin_tests crashed/failed under ASan -- see the asan-diagnostic-logs artifact for the report."
+          exit 1
 
   build:
     runs-on: windows-latest
@@ -170,84 +178,45 @@ jobs:
             -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded *>&1 | Tee-Object -FilePath cmake_configure_output.log
           exit $LASTEXITCODE
 
-      - name: Commit configure log on failure (self-diagnosing)
-        if: steps.cmake_configure.outcome == 'failure'
-        shell: pwsh
-        run: |
-          # No .gitignore here so this wasn't the bug on this repo, but
-          # PowerShell steps in GH Actions don't fail on a nonzero exit
-          # code from an external command unless you check it yourself --
-          # confirmed that silently ate a failure on BlazEng's equivalent
-          # step, so checking every git call explicitly here too.
-          git config user.email "ci@github-actions.local"
-          git config user.name "GitHub Actions CI"
-          git fetch origin ci-debug-logs 2>$null
-          git checkout -B ci-debug-logs
-          Copy-Item cmake_configure_output.log "cmake-configure-run$env:GITHUB_RUN_NUMBER.log"
-          git add -f "cmake-configure-run$env:GITHUB_RUN_NUMBER.log"
-          if ($LASTEXITCODE -ne 0) { Write-Error "git add failed"; exit 1 }
-          git commit -m "CI debug log: CMake configure failure, run $env:GITHUB_RUN_NUMBER"
-          if ($LASTEXITCODE -ne 0) { Write-Error "git commit failed"; exit 1 }
-          git push origin ci-debug-logs --force
-          if ($LASTEXITCODE -ne 0) { Write-Error "git push failed"; exit 1 }
-
-      - name: Fail the job if configure actually failed
-        if: steps.cmake_configure.outcome == 'failure'
-        shell: pwsh
-        run: exit 1
-
       - name: Build (Release)
         id: cmake_build
+        if: steps.cmake_configure.outcome == 'success'
         shell: pwsh
         continue-on-error: true
         run: |
           cmake --build build --config Release -j *>&1 | Tee-Object -FilePath cmake_build_output.log
           exit $LASTEXITCODE
 
-      - name: Commit build log on failure (self-diagnosing)
-        if: steps.cmake_build.outcome == 'failure'
-        shell: pwsh
-        run: |
-          git config user.email "ci@github-actions.local"
-          git config user.name "GitHub Actions CI"
-          git fetch origin ci-debug-logs 2>$null
-          git checkout -B ci-debug-logs
-          Copy-Item cmake_build_output.log "cmake-build-run$env:GITHUB_RUN_NUMBER.log"
-          git add -f "cmake-build-run$env:GITHUB_RUN_NUMBER.log"
-          if ($LASTEXITCODE -ne 0) { Write-Error "git add failed"; exit 1 }
-          git commit -m "CI debug log: CMake build failure, run $env:GITHUB_RUN_NUMBER"
-          if ($LASTEXITCODE -ne 0) { Write-Error "git commit failed"; exit 1 }
-          git push origin ci-debug-logs --force
-          if ($LASTEXITCODE -ne 0) { Write-Error "git push failed"; exit 1 }
-
-      - name: Fail the job if build actually failed
-        if: steps.cmake_build.outcome == 'failure'
-        shell: pwsh
-        run: exit 1
-
       - name: Run test suite
         id: run_tests
+        if: steps.cmake_build.outcome == 'success'
         shell: pwsh
         continue-on-error: true
         run: |
           ctest --test-dir build -C Release --output-on-failure *>&1 | Tee-Object -FilePath ctest_output.log
           exit $LASTEXITCODE
 
-      - name: Commit test log on failure (self-diagnosing)
-        if: steps.run_tests.outcome == 'failure'
+      - name: Upload build logs
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: build-logs-run${{ github.run_number }}
+          path: |
+            cmake_configure_output.log
+            cmake_build_output.log
+            ctest_output.log
+          if-no-files-found: ignore
+          retention-days: 30
+
+      - name: Fail the job if configure actually failed
+        if: steps.cmake_configure.outcome == 'failure'
         shell: pwsh
-        run: |
-          git config user.email "ci@github-actions.local"
-          git config user.name "GitHub Actions CI"
-          git fetch origin ci-debug-logs 2>$null
-          git checkout -B ci-debug-logs
-          Copy-Item ctest_output.log "ctest-run$env:GITHUB_RUN_NUMBER.log"
-          git add -f "ctest-run$env:GITHUB_RUN_NUMBER.log"
-          if ($LASTEXITCODE -ne 0) { Write-Error "git add failed"; exit 1 }
-          git commit -m "CI debug log: ctest failure, run $env:GITHUB_RUN_NUMBER"
-          if ($LASTEXITCODE -ne 0) { Write-Error "git commit failed"; exit 1 }
-          git push origin ci-debug-logs --force
-          if ($LASTEXITCODE -ne 0) { Write-Error "git push failed"; exit 1 }
+        run: exit 1
+
+      - name: Fail the job if build actually failed
+        if: steps.cmake_build.outcome == 'failure'
+        shell: pwsh
+        run: exit 1
 
       - name: Fail the job if tests actually failed
         if: steps.run_tests.outcome == 'failure'
@@ -259,7 +228,7 @@ jobs:
         run: |
           foreach ($exe in "build\Release\RinWindows.exe", "build\Release\rin-console.exe") {
             if (-not (Test-Path $exe)) {
-              Write-Error "$exe was not produced -- check the build log above."
+              Write-Error "$exe was not produced -- check the build-logs artifact above."
               exit 1
             }
           }
