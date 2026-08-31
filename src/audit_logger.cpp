@@ -15,7 +15,9 @@ int64_t now_millis() {
         .count();
 }
 
-std::optional<std::string> sanitize_key(const std::optional<std::string>& key) {
+}  // namespace
+
+std::optional<std::string> MeshAuditLogger::sanitize_key(const std::optional<std::string>& key) {
     // Audit logs must NEVER expose the full cryptographic material of a
     // key, only a short fingerprint -- the same principle CryptoEngine's
     // own fingerprint uses for the local identity.
@@ -25,7 +27,6 @@ std::optional<std::string> sanitize_key(const std::optional<std::string>& key) {
     }
     return "key:" + *key;
 }
-}  // namespace
 
 const char* to_string(AuditLevel level) {
     switch (level) {
