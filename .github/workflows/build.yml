@@ -209,7 +209,15 @@ jobs:
         shell: pwsh
         continue-on-error: true
         run: |
-          cmake --build build --config Release -j *>&1 | Tee-Object -FilePath cmake_build_output.log
+          # Unconstrained -j let MSBuild schedule as many parallel cl.exe/
+          # lib.exe jobs as there are cores. Run 31 compiled audit_logger.cpp
+          # successfully (confirmed in this same log) but rin_core.lib ended
+          # up missing every MeshAuditLogger symbol -- the archiver step
+          # (lib.exe) running before that .obj was fully flushed to disk is
+          # a known race under unconstrained parallelism on MSVC's Visual
+          # Studio generator, not a source-code problem. Capping to 2
+          # trades a little build speed for eliminating that race.
+          cmake --build build --config Release -j2 *>&1 | Tee-Object -FilePath cmake_build_output.log
           exit $LASTEXITCODE
 
       - name: Run test suite
