@@ -21,6 +21,7 @@ on:
       - "**.cpp"
       - "**.h"
       - "**.hpp"
+      - "**.manifest"
       - "CMakeLists.txt"
       - "tests/CMakeLists.txt"
       - "installer.iss"
