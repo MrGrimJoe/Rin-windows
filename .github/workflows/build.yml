@@ -137,8 +137,33 @@ jobs:
         run: exit 1
 
       - name: Run test suite
+        id: run_tests
         shell: pwsh
-        run: ctest --test-dir build -C Release --output-on-failure
+        continue-on-error: true
+        run: |
+          ctest --test-dir build -C Release --output-on-failure *>&1 | Tee-Object -FilePath ctest_output.log
+          exit $LASTEXITCODE
+
+      - name: Commit test log on failure (self-diagnosing)
+        if: steps.run_tests.outcome == 'failure'
+        shell: pwsh
+        run: |
+          git config user.email "ci@github-actions.local"
+          git config user.name "GitHub Actions CI"
+          git fetch origin ci-debug-logs 2>$null
+          git checkout -B ci-debug-logs
+          Copy-Item ctest_output.log "ctest-run$env:GITHUB_RUN_NUMBER.log"
+          git add -f "ctest-run$env:GITHUB_RUN_NUMBER.log"
+          if ($LASTEXITCODE -ne 0) { Write-Error "git add failed"; exit 1 }
+          git commit -m "CI debug log: ctest failure, run $env:GITHUB_RUN_NUMBER"
+          if ($LASTEXITCODE -ne 0) { Write-Error "git commit failed"; exit 1 }
+          git push origin ci-debug-logs --force
+          if ($LASTEXITCODE -ne 0) { Write-Error "git push failed"; exit 1 }
+
+      - name: Fail the job if tests actually failed
+        if: steps.run_tests.outcome == 'failure'
+        shell: pwsh
+        run: exit 1
 
       - name: Verify expected executables exist
         shell: pwsh
