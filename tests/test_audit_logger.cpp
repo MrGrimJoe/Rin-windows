@@ -187,14 +187,28 @@ void run_audit_logger_tests() {
         // (d) Exact repro shape from the original crashing block, repeated
         // several times in a loop, to see if it's a first-call-only issue
         // (e.g. static init) or reproduces every time.
+        //
+        // INSTRUMENTED: the crash is 0xc0000409 (STATUS_STACK_BUFFER_OVERRUN),
+        // not a clean exception -- stdout is NOT guaranteed to flush before
+        // the process dies. Every line below explicitly flushes immediately
+        // after printing, so whichever line is LAST in the captured log is
+        // the last statement that completed -- the crash is in whatever
+        // comes immediately after that point.
         for (int i = 0; i < 3; ++i) {
+            std::cout << "[REPRO] iter " << i << ": before io_context construct\n" << std::flush;
             asio::io_context io3;
+            std::cout << "[REPRO] iter " << i << ": before MeshEngine construct\n" << std::flush;
             MeshEngine engine3(io3);
+            std::cout << "[REPRO] iter " << i << ": before create_initial_mesh\n" << std::flush;
             engine3.create_initial_mesh("Repro Loop Mesh " + std::to_string(i), "Repro Device");
+            std::cout << "[REPRO] iter " << i << ": before CryptoEngine::verify\n" << std::flush;
             bool v = CryptoEngine::verify("some data", "ecdsa:not-a-real-signature",
                                             engine3.identity().local_public_key);
+            std::cout << "[REPRO] iter " << i << ": before log_signature_verification\n" << std::flush;
             MeshAuditLogger::instance().log_signature_verification(v, "Suspicious Peer", engine3.identity().local_public_key, 42);
+            std::cout << "[REPRO] iter " << i << ": after log_signature_verification (survived this iteration)\n" << std::flush;
         }
+        std::cout << "[REPRO] loop fully completed all 3 iterations\n" << std::flush;
         check(true, "the exact original repro shape survives 3 repetitions in a loop");
     }
 
