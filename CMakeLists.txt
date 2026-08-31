@@ -19,6 +19,24 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # command line. Only takes effect on MSVC; harmless elsewhere.
 if(MSVC)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+
+    # Every .cpp in this tree throws/catches C++ exceptions (CryptoException,
+    # RAII cleanup of OpenSSL handles, MeshAuditLogger's try/catch, etc.), but
+    # nothing was ever telling MSVC to use the synchronous C++ exception
+    # model. Without /EHsc, MSVC assumes extern "C" functions (OpenSSL,
+    # sqlite3.c, asio's C internals) can't throw and omits proper unwind
+    # info around calls into them -- so the FIRST exception thrown or
+    # caught near one of those calls corrupts the stack instead of
+    # unwinding it cleanly. This is exactly why every single translation
+    # unit was emitting "warning C4530: C++ exception handler used, but
+    # unwind semantics are not enabled" in the build log, and exactly why
+    # rin_tests crashed with 0xc0000409 (STATUS_STACK_BUFFER_OVERRUN) right
+    # after CryptoEngine::verify()'s try/catch around EVP_DigestVerifyFinal
+    # -- a real Windows/MSVC codegen problem that plain GCC/libstdc++ on
+    # Linux has no equivalent failure mode for, which is why the identical
+    # code and inputs never crash under ASan/UBSan off-platform.
+    # $<COMPILE_LANGUAGE:CXX> keeps this off sqlite3.c (compiled as C).
+    add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/EHsc>)
 endif()
 
 include(FetchContent)
