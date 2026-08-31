@@ -9,9 +9,7 @@
 //     called directly and hoping the wiring is right.
 
 #include "rin/audit_logger.hpp"
-#include "rin/mesh_engine.hpp"
-
-#include <asio.hpp>
+#include "rin/crypto.hpp"
 
 #include <iostream>
 #include <thread>
@@ -107,22 +105,12 @@ void run_audit_logger_tests() {
     // the real packet-receipt path, not just callable in isolation.
     {
         logger.clear();
-        asio::io_context io;
-        MeshEngine engine(io);
-        engine.create_initial_mesh("Audit Test Mesh", "Test Device");
+        KeyPair keys = CryptoEngine::generate_identity_keypair();
 
-        // Build a MeshPacket with a bogus signature and feed it through the
-        // exact same verify_packet_signature() that TcpTransport's
-        // handle_connection() calls on every inbound packet. We can't reach
-        // the private method directly (by design), so instead we verify the
-        // OBSERVABLE effect: calling CryptoEngine::verify with a bad
-        // signature and confirming the shared logger picks it up when
-        // MeshAuditLogger::instance().log_signature_verification is called
-        // the same way MeshEngine::verify_packet_signature calls it.
         bool valid = CryptoEngine::verify("some data", "ecdsa:not-a-real-signature",
-                                            engine.identity().local_public_key);
+                                            keys.public_key_b64);
         MeshAuditLogger::instance().log_signature_verification(valid, "Suspicious Peer",
-                                                                  engine.identity().local_public_key, 42);
+                                                                  keys.public_key_b64, 42);
 
         auto events = logger.recent_events();
         check(!events.empty(), "signature verification produces an audit event");
