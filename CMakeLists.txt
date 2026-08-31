@@ -19,6 +19,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # command line. Only takes effect on MSVC; harmless elsewhere.
 if(MSVC)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+    add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/EHsc>)
 
     # Every .cpp in this tree throws/catches C++ exceptions (CryptoException,
     # RAII cleanup of OpenSSL handles, MeshAuditLogger's try/catch, etc.), but
@@ -301,3 +302,4 @@ if(RIN_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
 endif()
+
