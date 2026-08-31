@@ -1,8 +1,25 @@
 cmake_minimum_required(VERSION 3.20)
+
+# Must be set BEFORE project() -- CMP0091 controls whether
+# CMAKE_MSVC_RUNTIME_LIBRARY is honored at all. Without this, MSVC ignores
+# any /MT or /MD selection passed on the command line and silently falls
+# back to the old hardcoded /MD (dynamic CRT) default for every target,
+# which can produce a mixed-CRT link against a statically-built vcpkg
+# OpenSSL and cause stack corruption that only shows up deep in call
+# stacks like OpenSSL's EVP_DigestVerifyFinal.
+cmake_policy(SET CMP0091 NEW)
+
 project(RinWindows VERSION 1.0.0 LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# Make the runtime library reproducible in-tree so the correct CRT doesn't
+# depend on someone remembering to pass -DCMAKE_MSVC_RUNTIME_LIBRARY on the
+# command line. Only takes effect on MSVC; harmless elsewhere.
+if(MSVC)
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
 
 include(FetchContent)
 
