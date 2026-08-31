@@ -39,6 +39,95 @@ permissions:
   contents: write
 
 jobs:
+  # Diagnostic-only job: builds rin_tests with MSVC's /fsanitize=address and
+  # runs it directly (not via ctest, so we get raw ASan output on stdout
+  # instead of just an exit code). This exists specifically because
+  # rin_tests has been crashing with 0xc0000409 (STATUS_STACK_BUFFER_OVERRUN)
+  # inside the audit-logger test on the real Windows/vcpkg build, and it
+  # reproduces cleanly under AddressSanitizer/UBSan on Linux against the
+  # identical code and inputs -- so the goal here is purely to get a precise
+  # ASan crash report (exact file/line/allocation) from the real Windows
+  # toolchain, since that's not something reproducible off-platform.
+  # Always uploads its log (pass or fail) so a clean run is also visible.
+  asan_diagnostic:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Bootstrap vcpkg
+        shell: pwsh
+        run: |
+          git clone https://github.com/microsoft/vcpkg.git "$env:GITHUB_WORKSPACE\vcpkg-ci"
+          & "$env:GITHUB_WORKSPACE\vcpkg-ci\bootstrap-vcpkg.bat"
+
+      - name: Install vcpkg dependencies (static triplet)
+        shell: pwsh
+        run: |
+          & "$env:GITHUB_WORKSPACE\vcpkg-ci\vcpkg.exe" install `
+            openssl:x64-windows-static `
+            libqrencode:x64-windows-static
+
+      - name: Configure with ASan
+        id: asan_configure
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          # RelWithDebInfo, not Debug: MSVC's /RTC runtime checks (default
+          # in Debug) are incompatible with /fsanitize=address. Keep debug
+          # symbols (/Zi via RelWithDebInfo) so a crash report has real
+          # file/line info instead of just addresses.
+          cmake -B build_asan -A x64 `
+            -DCMAKE_TOOLCHAIN_FILE="$env:GITHUB_WORKSPACE\vcpkg-ci\scripts\buildsystems\vcpkg.cmake" `
+            -DVCPKG_TARGET_TRIPLET=x64-windows-static `
+            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded `
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo `
+            -DCMAKE_CXX_FLAGS="/fsanitize=address /Zi" `
+            -DCMAKE_EXE_LINKER_FLAGS="/INCREMENTAL:NO" *>&1 | Tee-Object -FilePath asan_configure_output.log
+          exit $LASTEXITCODE
+
+      - name: Build rin_tests with ASan
+        id: asan_build
+        if: steps.asan_configure.outcome == 'success'
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          cmake --build build_asan --config RelWithDebInfo --target rin_tests -j *>&1 | Tee-Object -FilePath asan_build_output.log
+          exit $LASTEXITCODE
+
+      - name: Run rin_tests directly under ASan
+        id: asan_run
+        if: steps.asan_build.outcome == 'success'
+        shell: pwsh
+        continue-on-error: true
+        env:
+          ASAN_OPTIONS: "print_stats=1"
+        run: |
+          & "build_asan\tests\RelWithDebInfo\rin_tests.exe" *>&1 | Tee-Object -FilePath asan_run_output.log
+          exit $LASTEXITCODE
+
+      - name: Commit ASan diagnostic logs
+        if: always()
+        shell: pwsh
+        run: |
+          git config user.email "ci@github-actions.local"
+          git config user.name "GitHub Actions CI"
+          git fetch origin ci-debug-logs 2>$null
+          git checkout -B ci-debug-logs
+          $found = $false
+          foreach ($f in @("asan_configure_output.log", "asan_build_output.log", "asan_run_output.log")) {
+            if (Test-Path $f) {
+              Copy-Item $f "$f.run$env:GITHUB_RUN_NUMBER.log"
+              git add -f "$f.run$env:GITHUB_RUN_NUMBER.log"
+              $found = $true
+            }
+          }
+          if (-not $found) { Write-Host "No ASan logs produced -- nothing to commit."; exit 0 }
+          git commit -m "ASan diagnostic logs, run $env:GITHUB_RUN_NUMBER"
+          if ($LASTEXITCODE -ne 0) { Write-Error "git commit failed"; exit 1 }
+          git push origin ci-debug-logs --force
+          if ($LASTEXITCODE -ne 0) { Write-Error "git push failed"; exit 1 }
+
   build:
     runs-on: windows-latest
     steps:
