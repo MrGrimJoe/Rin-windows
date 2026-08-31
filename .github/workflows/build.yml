@@ -114,6 +114,24 @@ jobs:
         env:
           ASAN_OPTIONS: "print_stats=1"
         run: |
+          # MSVC's ASan runtime on Windows is a documented gap in the
+          # toolchain, not something specific to this repo: an ASan-
+          # instrumented exe fails immediately with STATUS_DLL_INIT_FAILED
+          # and produces ZERO output -- not even to a Tee-Object'd file --
+          # if clang_rt.asan_dynamic-x86_64.dll isn't sitting next to the
+          # exe or otherwise on PATH. Confirmed via multiple independent
+          # reports of this exact symptom on GitHub-hosted Windows runners
+          # (actions/runner-images#8891, MS C++ team blog on the 17.7+
+          # ASan DLL changes). The documented workaround is to copy the
+          # DLL alongside the executable before running it.
+          $clangBin = Split-Path (Get-Command cl.exe).Source -Parent
+          $asanDll = Join-Path $clangBin "clang_rt.asan_dynamic-x86_64.dll"
+          if (Test-Path $asanDll) {
+            Copy-Item $asanDll "build_asan\tests\RelWithDebInfo\" -Force
+            Write-Host "Copied ASan runtime DLL from $asanDll"
+          } else {
+            Write-Warning "clang_rt.asan_dynamic-x86_64.dll not found under $clangBin -- ASan run will likely fail to launch at all."
+          }
           & "build_asan\tests\RelWithDebInfo\rin_tests.exe" *>&1 | Tee-Object -FilePath asan_run_output.log
           exit $LASTEXITCODE
 
