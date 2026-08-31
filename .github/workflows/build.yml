@@ -124,13 +124,20 @@ jobs:
           # (actions/runner-images#8891, MS C++ team blog on the 17.7+
           # ASan DLL changes). The documented workaround is to copy the
           # DLL alongside the executable before running it.
-          $clangBin = Split-Path (Get-Command cl.exe).Source -Parent
-          $asanDll = Join-Path $clangBin "clang_rt.asan_dynamic-x86_64.dll"
-          if (Test-Path $asanDll) {
+          #
+          # cl.exe is NOT on PATH in a plain pwsh step (only inside the
+          # cmake --build step, where MSBuild finds it internally without
+          # needing PATH) -- confirmed by run 28's "'cl.exe' is not
+          # recognized" failure. Use vswhere (always present on GitHub's
+          # Windows runners) to locate the VS install instead.
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vsInstallPath = & $vswhere -latest -property installationPath
+          $asanDll = Get-ChildItem -Path "$vsInstallPath\VC\Tools\MSVC" -Filter "clang_rt.asan_dynamic-x86_64.dll" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
+          if ($asanDll) {
             Copy-Item $asanDll "build_asan\tests\RelWithDebInfo\" -Force
             Write-Host "Copied ASan runtime DLL from $asanDll"
           } else {
-            Write-Warning "clang_rt.asan_dynamic-x86_64.dll not found under $clangBin -- ASan run will likely fail to launch at all."
+            Write-Warning "clang_rt.asan_dynamic-x86_64.dll not found under $vsInstallPath -- ASan run will likely fail to launch at all."
           }
           & "build_asan\tests\RelWithDebInfo\rin_tests.exe" *>&1 | Tee-Object -FilePath asan_run_output.log
           exit $LASTEXITCODE
