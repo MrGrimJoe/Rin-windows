@@ -271,15 +271,20 @@ jobs:
       - name: Always commit the debug/RTC log, pass or fail
         shell: pwsh
         run: |
+          # Dedicated branch, NOT ci-debug-logs -- that branch is also
+          # force-pushed by the `build` job's own log-commit steps, and
+          # since both jobs run concurrently, run 40 proved they race:
+          # build's push clobbered this job's log before it could be
+          # read. Separate branch = no shared ref = no race, period.
           git config user.email "ci@github-actions.local"
           git config user.name "GitHub Actions CI"
-          git fetch origin ci-debug-logs 2>$null
-          git checkout -B ci-debug-logs
+          git fetch origin ci-debug-logs-rtc 2>$null
+          git checkout -B ci-debug-logs-rtc
           Copy-Item rtc_debug_output.log "rtc-debug-run$env:GITHUB_RUN_NUMBER.log"
           git add -f "rtc-debug-run$env:GITHUB_RUN_NUMBER.log"
           if ($LASTEXITCODE -ne 0) { Write-Error "git add failed"; exit 1 }
           git commit -m "CI debug log: /RTC1 debug run $env:GITHUB_RUN_NUMBER"
           if ($LASTEXITCODE -ne 0) { Write-Error "git commit failed"; exit 1 }
-          git push origin ci-debug-logs --force
+          git push origin ci-debug-logs-rtc --force
           if ($LASTEXITCODE -ne 0) { Write-Error "git push failed"; exit 1 }
 
