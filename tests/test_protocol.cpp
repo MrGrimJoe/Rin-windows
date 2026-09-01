@@ -9,6 +9,7 @@
 
 #include "rin/protocol.hpp"
 
+#include <exception>
 #include <iostream>
 
 #ifdef _WIN32
@@ -178,6 +179,34 @@ int g_persistence_test_failures();
 int g_file_transfer_test_failures();
 
 int main() {
+    // run 39's rtc-debug log crashed with a bare "abort() has been
+    // called" -- that exact text is printed by the CRT for ANY abort()
+    // call (RTC failure, raw abort(), or std::terminate() on an
+    // uncaught exception) and doesn't distinguish which. No
+    // "Run-Time Check Failure" text preceded it, which argues against
+    // this actually being an /RTC1-caught stack smash. Installing an
+    // explicit terminate handler settles it either way: if an
+    // exception is escaping, this prints its type/what() before
+    // aborting; if nothing prints here, that rules out std::terminate
+    // and points back toward real corruption.
+    std::set_terminate([]() {
+        std::cerr << "\n*** std::terminate() called";
+        if (auto eptr = std::current_exception()) {
+            try {
+                std::rethrow_exception(eptr);
+            } catch (const std::exception& e) {
+                std::cerr << " -- uncaught std::exception: " << e.what() << "\n";
+            } catch (...) {
+                std::cerr << " -- uncaught exception of unknown (non-std::exception) type\n";
+            }
+        } else {
+            std::cerr << " -- no active exception (direct terminate()/abort() call, "
+                          "not an uncaught throw)\n";
+        }
+        std::cerr.flush();
+        std::abort();
+    });
+
 #ifdef _WIN32
     // Debug CRT's default report mode for _CRT_ASSERT/_CRT_ERROR (which
     // includes /RTC1 runtime-check failures) is _CRTDBG_MODE_WNDW --
