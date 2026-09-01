@@ -11,6 +11,12 @@
 
 #include <iostream>
 
+#ifdef _WIN32
+#define NOMINMAX
+#include <crtdbg.h>
+#include <windows.h>
+#endif
+
 using namespace rin;
 
 extern int g_crypto_test_failures();
@@ -172,6 +178,24 @@ int g_persistence_test_failures();
 int g_file_transfer_test_failures();
 
 int main() {
+#ifdef _WIN32
+    // Debug CRT's default report mode for _CRT_ASSERT/_CRT_ERROR (which
+    // includes /RTC1 runtime-check failures) is _CRTDBG_MODE_WNDW --
+    // pops an Abort/Retry/Ignore message box. On a headless CI runner
+    // there's no one to click it, so the process just hangs until the
+    // job's own timeout (this is exactly what happened to
+    // diagnostic_debug_rtc's first run: 40+ minutes "in progress" on
+    // the "Run rin_tests directly" step, not actually still running).
+    // Route reports to stderr instead so a crash prints and exits.
+    _CrtSetReportMode(_CRT_ASSERT, _CRTDBG_MODE_FILE);
+    _CrtSetReportFile(_CRT_ASSERT, _CRTDBG_FILE_STDERR);
+    _CrtSetReportMode(_CRT_ERROR, _CRTDBG_MODE_FILE);
+    _CrtSetReportFile(_CRT_ERROR, _CRTDBG_FILE_STDERR);
+    // Also suppress the separate WER "<exe> has stopped working" dialog
+    // for hard crashes (unhandled SEH / access violations), same reason.
+    SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
+#endif
+
     run_crypto_tests();
     run_protocol_tests();
     run_qr_tests();
