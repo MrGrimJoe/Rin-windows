@@ -1,0 +1,240 @@
+Test project D:/a/Rin-windows/Rin-windows/build
+    Start 1: rin_tests
+1/1 Test #1: rin_tests ........................Exit code 0xc0000409***Exception:   1.22 sec
+
+== Crypto tests ==
+  [PASS] keypair generation produces keys
+  [PASS] two keypairs are distinct
+  [PASS] fingerprint has expected prefix
+  [PASS] base64 round-trip preserves arbitrary bytes
+  [PASS] signature has ecdsa: prefix
+  [PASS] valid signature verifies
+  [PASS] signature rejected under wrong public key
+  [PASS] signature rejected when data is tampered
+  [PASS] non-ecdsa-prefixed signature is rejected outright (no fallback)
+  [PASS] empty signature rejected
+  [PASS] empty public key rejected
+  [PASS] malformed base64 in signature does not throw, just fails
+  [PASS] sign() throws CryptoException on invalid private key (fail closed, no fallback)
+  [PASS] AES-GCM round-trip preserves plaintext
+  [PASS] decrypt throws (not silently wrong-plaintext) under wrong key
+  [PASS] decrypt throws on tampered ciphertext (GCM auth tag catches it)
+  [PASS] decrypt throws on too-short ciphertext rather than returning garbage
+  [PASS] decrypt throws on malformed base64 rather than returning input verbatim
+  [PASS] ECDH shared secret matches from both sides
+  [PASS] derived peer session key matches from both sides
+  [PASS] different session_id salts produce different keys (forward secrecy)
+  [PASS] message encrypted with Alice's derived key decrypts with Bob's derived key
+  [PASS] ECDH throws CryptoException on malformed peer public key
+  [PASS] mesh key derivation is deterministic given the same secret+name
+  [PASS] different mesh names produce different keys even with same secret
+  [PASS] legacy empty-secret fallback is at least deterministic (still NOT a real secret -- see docs)
+  [PASS] ephemeral token has expected prefix
+  [PASS] session ID has expected prefix
+  [PASS] session IDs are not repeated
+All crypto tests passed.
+
+== Protocol tests ==
+  [PASS] ClipboardSync serializes to CLIPBOARD_SYNC
+  [PASS] JoinAccept serializes to JOIN_ACCEPT
+  [PASS] BrowserHandoff serializes to BROWSER_HANDOFF
+  [PASS] HEARTBEAT round-trips
+  [PASS] unknown packet type string is rejected, not defaulted silently
+  [PASS] wire JSON uses abbreviated key 'v' for version
+  [PASS] wire JSON uses 'sess' for session_id
+  [PASS] wire JSON uses 'seq' for sequence
+  [PASS] wire JSON uses 'type' with enum name
+  [PASS] wire JSON uses 'senderKey'
+  [PASS] wire JSON uses 'senderName'
+  [PASS] wire JSON includes 'targetKey' when present
+  [PASS] wire JSON uses 'payload'
+  [PASS] wire JSON uses 'sig' (not 'signature')
+  [PASS] wire JSON uses 'rail' with enum name
+  [PASS] wire JSON uses 'ts' for timestamp
+  [PASS] packet JSON parses back successfully
+  [PASS] round-trip preserves session_id
+  [PASS] round-trip preserves sequence
+  [PASS] round-trip preserves type
+  [PASS] round-trip preserves sender_key
+  [PASS] round-trip preserves target_key
+  [PASS] round-trip preserves signature
+  [PASS] round-trip preserves rail
+  [PASS] targetKey key is omitted entirely when absent, not null
+  [PASS] malformed JSON line yields nullopt, matching Android's parse-and-continue
+  [PASS] unknown packet type in JSON yields nullopt rather than a garbage default
+  [PASS] QR token uses 'meshName'
+  [PASS] QR token uses 'hostPublicKey'
+  [PASS] QR token uses 'ephemeralToken'
+  [PASS] QR token includes meshSecret when present
+  [PASS] QR token includes hostIp when present
+  [PASS] QR token JSON parses back
+  [PASS] QR token round-trip preserves mesh_name
+  [PASS] QR token round-trip preserves mesh_secret
+  [PASS] QR token round-trip preserves host_ip
+  [PASS] QR token without meshSecret/hostIp still parses
+  [PASS] missing meshSecret parses as nullopt, not empty string
+  [PASS] missing hostIp parses as nullopt
+All protocol tests passed.
+
+== QR code tests ==
+  [PASS] encode produces a non-empty module grid
+  [PASS] module buffer size matches module_count^2
+  [SKIP] ZXing round-trip decode test (libzxing-dev not found at configure time)
+  [PASS] a 600-byte payload (larger than a typical join token) still encodes
+  [PASS] doubling scale doubles the rendered pixel dimensions
+All QR tests passed.
+
+== Audit logger tests ==
+[CONNECTION] test message
+  [PASS] log() adds an event retrievable via recent_events()
+  [PASS] event preserves the logged message
+  [PASS] event preserves the logged level
+  [PASS] event preserves the logged category
+  [PASS] event gets a nonzero monotonic id
+[OK] [SIGNATURE_VERIFICATION] sig check (Peer: SomePeer key:MFkw...9A==)
+  [PASS] a peer key produces a fingerprint field
+  [PASS] the fingerprint is NOT the raw full key
+  [PASS] the fingerprint is meaningfully shorter than the full key
+  [PASS] the fingerprint has the expected 'key:' prefix
+[CONNECTION] event 0
+[CONNECTION] event 1
+[CONNECTION] event 2
+[CONNECTION] event 3
+[CONNECTION] event 4
+[CONNECTION] event 5
+[CONNECTION] event 6
+[CONNECTION] event 7
+[CONNECTION] event 8
+[CONNECTION] event 9
+[CONNECTION] event 10
+[CONNECTION] event 11
+[CONNECTION] event 12
+[CONNECTION] event 13
+[CONNECTION] event 14
+[CONNECTION] event 15
+[CONNECTION] event 16
+[CONNECTION] event 17
+[CONNECTION] event 18
+[CONNECTION] event 19
+[CONNECTION] event 20
+[CONNECTION] event 21
+[CONNECTION] event 22
+[CONNECTION] event 23
+[CONNECTION] event 24
+[CONNECTION] event 25
+[CONNECTION] event 26
+[CONNECTION] event 27
+[CONNECTION] event 28
+[CONNECTION] event 29
+[CONNECTION] event 30
+[CONNECTION] event 31
+[CONNECTION] event 32
+[CONNECTION] event 33
+[CONNECTION] event 34
+[CONNECTION] event 35
+[CONNECTION] event 36
+[CONNECTION] event 37
+[CONNECTION] event 38
+[CONNECTION] event 39
+[CONNECTION] event 40
+[CONNECTION] event 41
+[CONNECTION] event 42
+[CONNECTION] event 43
+[CONNECTION] event 44
+[CONNECTION] event 45
+[CONNECTION] event 46
+[CONNECTION] event 47
+[CONNECTION] event 48
+[CONNECTION] event 49
+[CONNECTION] event 50
+[CONNECTION] event 51
+[CONNECTION] event 52
+[CONNECTION] event 53
+[CONNECTION] event 54
+[CONNECTION] event 55
+[CONNECTION] event 56
+[CONNECTION] event 57
+[CONNECTION] event 58
+[CONNECTION] event 59
+[CONNECTION] event 60
+[CONNECTION] event 61
+[CONNECTION] event 62
+[CONNECTION] event 63
+[CONNECTION] event 64
+[CONNECTION] event 65
+[CONNECTION] event 66
+[CONNECTION] event 67
+[CONNECTION] event 68
+[CONNECTION] event 69
+[CONNECTION] event 70
+[CONNECTION] event 71
+[CONNECTION] event 72
+[CONNECTION] event 73
+[CONNECTION] event 74
+[CONNECTION] event 75
+[CONNECTION] event 76
+[CONNECTION] event 77
+[CONNECTION] event 78
+[CONNECTION] event 79
+[CONNECTION] event 80
+[CONNECTION] event 81
+[CONNECTION] event 82
+[CONNECTION] event 83
+[CONNECTION] event 84
+[CONNECTION] event 85
+[CONNECTION] event 86
+[CONNECTION] event 87
+[CONNECTION] event 88
+[CONNECTION] event 89
+[CONNECTION] event 90
+[CONNECTION] event 91
+[CONNECTION] event 92
+[CONNECTION] event 93
+[CONNECTION] event 94
+[CONNECTION] event 95
+[CONNECTION] event 96
+[CONNECTION] event 97
+[CONNECTION] event 98
+[CONNECTION] event 99
+[CONNECTION] event 100
+[CONNECTION] event 101
+[CONNECTION] event 102
+[CONNECTION] event 103
+[CONNECTION] event 104
+[CONNECTION] event 105
+[CONNECTION] event 106
+[CONNECTION] event 107
+[CONNECTION] event 108
+[CONNECTION] event 109
+[CONNECTION] event 110
+[CONNECTION] event 111
+[CONNECTION] event 112
+[CONNECTION] event 113
+[CONNECTION] event 114
+[CONNECTION] event 115
+[CONNECTION] event 116
+[CONNECTION] event 117
+[CONNECTION] event 118
+[CONNECTION] event 119
+[CONNECTION] event 120
+[CONNECTION] event 121
+[CONNECTION] event 122
+[CONNECTION] event 123
+[CONNECTION] event 124
+  [PASS] buffer never grows past kMaxEventBuffer even after many more log() calls
+  [PASS] the buffer keeps the MOST RECENT events, not the oldest, once it's full
+[CONNECTION] will be cleared
+  [PASS] clear() empties the event buffer
+[CONNECTION] time check
+  [PASS] event logged for time-format check
+  [PASS] formatted_time() produces HH:MM:SS.mmm shape (got: 13:30:08.784)
+[ERROR] [SIGNATURE_VERIFICATION] ECDSA signature validation FAILED for packet #42 from Suspicious Peer (Peer: Suspicious Peer key:MFkw...mQ==) | Details: Packet rejected. Possible tampering or key mismatch.
+
+
+0% tests passed, 1 tests failed out of 1
+
+Total Test time (real) =   1.36 sec
+
+The following tests FAILED:
+	  1 - rin_tests (Exit code 0xc0000409)
+Errors while running CTest

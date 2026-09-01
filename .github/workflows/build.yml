@@ -212,3 +212,74 @@ jobs:
           files: ${{ steps.out.outputs.path }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # -------------------------------------------------------------------
+  # Diagnostic only -- no `needs:` in either direction between this and
+  # `build`, so this can never block the release pipeline no matter how
+  # it turns out. That's the mistake last time: the ASan job never got
+  # usable output in two days of trying and just sat there unable to
+  # even compile/link. /RTC1 needs no extra sanitizer runtime (unlike
+  # ASan), CMake already turns it on automatically for MSVC Debug
+  # builds, and on a hit it reports the exact function + variable at
+  # the moment of corruption instead of a bare 0xc0000409 -- so this
+  # should either nail the exact line on the first run, or at least
+  # rule out the /EHsc-related stack corruption theory in
+  # CMakeLists.txt concretely instead of by inference (that theory's
+  # fix -- add_compile_options(/EHsc) -- is already in CMakeLists.txt
+  # as of the current commit and rin_tests still crashed identically in
+  # run 37, so it's not actually confirmed to be the cause).
+  diagnostic_debug_rtc:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Bootstrap vcpkg
+        shell: pwsh
+        run: |
+          git clone https://github.com/microsoft/vcpkg.git "$env:GITHUB_WORKSPACE\vcpkg-ci"
+          & "$env:GITHUB_WORKSPACE\vcpkg-ci\bootstrap-vcpkg.bat"
+
+      - name: Install vcpkg dependencies (static triplet)
+        shell: pwsh
+        run: |
+          & "$env:GITHUB_WORKSPACE\vcpkg-ci\vcpkg.exe" install `
+            openssl:x64-windows-static `
+            libqrencode:x64-windows-static
+
+      - name: Configure (Debug -- CMake applies /RTC1 automatically for MSVC Debug)
+        shell: pwsh
+        run: |
+          cmake -B build-debug -A x64 `
+            -DCMAKE_BUILD_TYPE=Debug `
+            -DCMAKE_TOOLCHAIN_FILE="$env:GITHUB_WORKSPACE\vcpkg-ci\scripts\buildsystems\vcpkg.cmake" `
+            -DVCPKG_TARGET_TRIPLET=x64-windows-static `
+            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDebug
+
+      - name: Build (Debug)
+        shell: pwsh
+        run: cmake --build build-debug --config Debug -j
+
+      - name: Run rin_tests directly (not via ctest -- want the raw RTC output)
+        id: run_debug_tests
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          & "build-debug\tests\Debug\rin_tests.exe" *>&1 | Tee-Object -FilePath rtc_debug_output.log
+          exit $LASTEXITCODE
+
+      - name: Always commit the debug/RTC log, pass or fail
+        shell: pwsh
+        run: |
+          git config user.email "ci@github-actions.local"
+          git config user.name "GitHub Actions CI"
+          git fetch origin ci-debug-logs 2>$null
+          git checkout -B ci-debug-logs
+          Copy-Item rtc_debug_output.log "rtc-debug-run$env:GITHUB_RUN_NUMBER.log"
+          git add -f "rtc-debug-run$env:GITHUB_RUN_NUMBER.log"
+          if ($LASTEXITCODE -ne 0) { Write-Error "git add failed"; exit 1 }
+          git commit -m "CI debug log: /RTC1 debug run $env:GITHUB_RUN_NUMBER"
+          if ($LASTEXITCODE -ne 0) { Write-Error "git commit failed"; exit 1 }
+          git push origin ci-debug-logs --force
+          if ($LASTEXITCODE -ne 0) { Write-Error "git push failed"; exit 1 }
+
