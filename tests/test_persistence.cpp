@@ -40,10 +40,12 @@ void run_persistence_tests() {
         std::string path = temp_db_path("fresh");
         std::filesystem::remove(path);
 
-        PersistenceStore store(path);
-        auto identity = store.load_identity();
-        check(!identity.has_value(), "a freshly created database has no saved identity");
-        check(store.load_all_devices().empty(), "a freshly created database has no saved devices");
+        {
+            PersistenceStore store(path);
+            auto identity = store.load_identity();
+            check(!identity.has_value(), "a freshly created database has no saved identity");
+            check(store.load_all_devices().empty(), "a freshly created database has no saved devices");
+        }  // store destructs here, closing the DB, before we try to remove the file
 
         std::filesystem::remove(path);
     }
@@ -53,26 +55,28 @@ void run_persistence_tests() {
         std::string path = temp_db_path("same_instance");
         std::filesystem::remove(path);
 
-        PersistenceStore store(path);
-        MeshIdentity identity;
-        identity.mesh_name = "Test Mesh";
-        identity.local_device_name = "Test PC";
-        identity.local_public_key = "fake_pub_key_base64";
-        identity.local_private_key = "fake_priv_key_base64";
-        identity.local_fingerprint = "key:abcd...wxyz";
-        identity.mesh_secret = "fake_mesh_secret_hex";
-        identity.port = 45990;
+        {
+            PersistenceStore store(path);
+            MeshIdentity identity;
+            identity.mesh_name = "Test Mesh";
+            identity.local_device_name = "Test PC";
+            identity.local_public_key = "fake_pub_key_base64";
+            identity.local_private_key = "fake_priv_key_base64";
+            identity.local_fingerprint = "key:abcd...wxyz";
+            identity.mesh_secret = "fake_mesh_secret_hex";
+            identity.port = 45990;
 
-        store.save_identity(identity);
-        auto loaded = store.load_identity();
-        check(loaded.has_value(), "identity round-trips within the same store instance");
-        if (loaded.has_value()) {
-            check(loaded->mesh_name == identity.mesh_name, "mesh_name preserved");
-            check(loaded->local_private_key == identity.local_private_key,
-                  "local_private_key preserved (this is the most safety-critical field to get right)");
-            check(loaded->mesh_secret == identity.mesh_secret, "mesh_secret preserved");
-            check(loaded->port == identity.port, "port preserved");
-        }
+            store.save_identity(identity);
+            auto loaded = store.load_identity();
+            check(loaded.has_value(), "identity round-trips within the same store instance");
+            if (loaded.has_value()) {
+                check(loaded->mesh_name == identity.mesh_name, "mesh_name preserved");
+                check(loaded->local_private_key == identity.local_private_key,
+                      "local_private_key preserved (this is the most safety-critical field to get right)");
+                check(loaded->mesh_secret == identity.mesh_secret, "mesh_secret preserved");
+                check(loaded->port == identity.port, "port preserved");
+            }
+        }  // store destructs here, closing the DB, before we try to remove the file
 
         std::filesystem::remove(path);
     }
@@ -134,24 +138,27 @@ void run_persistence_tests() {
     {
         std::string path = temp_db_path("upsert");
         std::filesystem::remove(path);
-        PersistenceStore store(path);
 
-        TrustedDevice device;
-        device.public_key = "same_key";
-        device.name = "Original Name";
-        device.port = 1000;
-        store.upsert_device(device);
+        {
+            PersistenceStore store(path);
 
-        device.name = "Updated Name";
-        device.port = 2000;
-        store.upsert_device(device);
+            TrustedDevice device;
+            device.public_key = "same_key";
+            device.name = "Original Name";
+            device.port = 1000;
+            store.upsert_device(device);
 
-        auto devices = store.load_all_devices();
-        check(devices.size() == 1, "upserting the same public_key twice results in ONE row, not two");
-        if (!devices.empty()) {
-            check(devices[0].name == "Updated Name", "the second upsert's values win");
-            check(devices[0].port == 2000, "the second upsert's port wins");
-        }
+            device.name = "Updated Name";
+            device.port = 2000;
+            store.upsert_device(device);
+
+            auto devices = store.load_all_devices();
+            check(devices.size() == 1, "upserting the same public_key twice results in ONE row, not two");
+            if (!devices.empty()) {
+                check(devices[0].name == "Updated Name", "the second upsert's values win");
+                check(devices[0].port == 2000, "the second upsert's port wins");
+            }
+        }  // store destructs here, closing the DB, before we try to remove the file
 
         std::filesystem::remove(path);
     }
@@ -160,23 +167,26 @@ void run_persistence_tests() {
     {
         std::string path = temp_db_path("remove");
         std::filesystem::remove(path);
-        PersistenceStore store(path);
 
-        TrustedDevice a, b;
-        a.public_key = "key_a";
-        a.name = "Device A";
-        b.public_key = "key_b";
-        b.name = "Device B";
-        store.upsert_device(a);
-        store.upsert_device(b);
-        check(store.load_all_devices().size() == 2, "two devices saved");
+        {
+            PersistenceStore store(path);
 
-        store.remove_device("key_a");
-        auto remaining = store.load_all_devices();
-        check(remaining.size() == 1, "removing one device leaves exactly one");
-        if (!remaining.empty()) {
-            check(remaining[0].public_key == "key_b", "the REMAINING device is the one that wasn't removed");
-        }
+            TrustedDevice a, b;
+            a.public_key = "key_a";
+            a.name = "Device A";
+            b.public_key = "key_b";
+            b.name = "Device B";
+            store.upsert_device(a);
+            store.upsert_device(b);
+            check(store.load_all_devices().size() == 2, "two devices saved");
+
+            store.remove_device("key_a");
+            auto remaining = store.load_all_devices();
+            check(remaining.size() == 1, "removing one device leaves exactly one");
+            if (!remaining.empty()) {
+                check(remaining[0].public_key == "key_b", "the REMAINING device is the one that wasn't removed");
+            }
+        }  // store destructs here, closing the DB, before we try to remove the file
 
         std::filesystem::remove(path);
     }
@@ -185,20 +195,23 @@ void run_persistence_tests() {
     {
         std::string path = temp_db_path("clear");
         std::filesystem::remove(path);
-        PersistenceStore store(path);
 
-        MeshIdentity identity;
-        identity.mesh_name = "To Be Cleared";
-        store.save_identity(identity);
-        TrustedDevice device;
-        device.public_key = "will_be_cleared";
-        store.upsert_device(device);
+        {
+            PersistenceStore store(path);
 
-        store.clear_identity();
-        check(!store.load_identity().has_value(), "clear_identity() actually removes the saved identity");
+            MeshIdentity identity;
+            identity.mesh_name = "To Be Cleared";
+            store.save_identity(identity);
+            TrustedDevice device;
+            device.public_key = "will_be_cleared";
+            store.upsert_device(device);
 
-        store.clear_all_devices();
-        check(store.load_all_devices().empty(), "clear_all_devices() actually removes all saved devices");
+            store.clear_identity();
+            check(!store.load_identity().has_value(), "clear_identity() actually removes the saved identity");
+
+            store.clear_all_devices();
+            check(store.load_all_devices().empty(), "clear_all_devices() actually removes all saved devices");
+        }  // store destructs here, closing the DB, before we try to remove the file
 
         std::filesystem::remove(path);
     }
@@ -207,17 +220,20 @@ void run_persistence_tests() {
     {
         std::string path = temp_db_path("no_ip");
         std::filesystem::remove(path);
-        PersistenceStore store(path);
 
-        TrustedDevice device;
-        device.public_key = "no_ip_key";
-        device.name = "Unresolved Device";
-        device.ip_address = std::nullopt;
-        store.upsert_device(device);
+        {
+            PersistenceStore store(path);
 
-        auto devices = store.load_all_devices();
-        check(devices.size() == 1 && !devices[0].ip_address.has_value(),
-              "a device saved with no IP address loads back with ip_address as nullopt, not an empty string");
+            TrustedDevice device;
+            device.public_key = "no_ip_key";
+            device.name = "Unresolved Device";
+            device.ip_address = std::nullopt;
+            store.upsert_device(device);
+
+            auto devices = store.load_all_devices();
+            check(devices.size() == 1 && !devices[0].ip_address.has_value(),
+                  "a device saved with no IP address loads back with ip_address as nullopt, not an empty string");
+        }  // store destructs here, closing the DB, before we try to remove the file
 
         std::filesystem::remove(path);
     }
