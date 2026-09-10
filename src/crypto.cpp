@@ -257,6 +257,30 @@ std::array<uint8_t, 32> CryptoEngine::derive_mesh_encryption_key(const std::stri
 }
 
 // ---------------------------------------------------------------------
+// Discovery hardening -- see header doc comment for the full rationale.
+// derive_beacon_tag reuses hkdf_derive_key (the same primitive behind
+// derive_mesh_encryption_key/derive_peer_session_key) rather than a new
+// derivation path, so this stays trivially in sync with the already
+// cross-platform-verified HKDF implementation.
+// ---------------------------------------------------------------------
+
+std::string CryptoEngine::derive_beacon_tag(const std::array<uint8_t, 32>& mesh_key,
+                                             int64_t time_bucket) {
+    std::string info = "rin-beacon-tag-v1:" + std::to_string(time_bucket);
+    std::vector<uint8_t> ikm(mesh_key.begin(), mesh_key.end());
+    std::vector<uint8_t> empty_salt;  // hkdf_extract substitutes 32 zero bytes, matching Android's salt=null
+    std::array<uint8_t, 32> derived = hkdf_derive_key(ikm, empty_salt, info);
+    std::vector<uint8_t> truncated(derived.begin(), derived.begin() + 9);
+    return base64_encode(truncated);
+}
+
+std::string CryptoEngine::generate_discovery_nonce() {
+    uint8_t buf[16];
+    if (RAND_bytes(buf, sizeof(buf)) != 1) throw_openssl_error("generate_discovery_nonce");
+    return base64_encode(std::vector<uint8_t>(buf, buf + sizeof(buf)));
+}
+
+// ---------------------------------------------------------------------
 // Signatures -- strict ECDSA, fail closed
 // ---------------------------------------------------------------------
 

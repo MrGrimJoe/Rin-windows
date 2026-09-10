@@ -5,6 +5,8 @@ add_executable(rin_tests
     test_audit_logger.cpp
     test_persistence.cpp
     test_file_transfer.cpp
+    test_relay.cpp
+    test_discovery.cpp
 )
 target_link_libraries(rin_tests PRIVATE rin_core)
 # Same MSBuild/CMake gap fixed in the root CMakeLists.txt for rin_console --

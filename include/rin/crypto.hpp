@@ -88,6 +88,28 @@ public:
     static std::array<uint8_t, 32> derive_mesh_encryption_key(const std::string& mesh_secret,
                                                                 const std::string& mesh_name);
 
+    // -- Discovery hardening (beacon v2 + challenge/response) -----------
+    // A rotating, mesh-secret-derived tag carried on the UDP discovery
+    // beacon INSTEAD of the mesh name / device name in cleartext. Only a
+    // device that already holds the real mesh key can compute a matching
+    // tag, so a passive LAN observer sees an opaque blob, not "mesh
+    // 'Family' has a device named 'Ali-Phone'". time_bucket should be a
+    // coarse window (e.g. unix seconds / 300) -- callers check the
+    // current bucket plus neighbors to tolerate clock drift / broadcast
+    // timing, since this is a discovery HINT, not the trust boundary.
+    // The actual trust boundary is the discovery challenge/response
+    // handshake (see MeshEngine), which requires successfully
+    // encrypting/decrypting with this same mesh key, not just producing
+    // a matching tag guess. Must byte-for-byte match Android's
+    // CryptoEngine.deriveBeaconTag -- same HKDF info string, same 9-byte
+    // truncation.
+    static std::string derive_beacon_tag(const std::array<uint8_t, 32>& mesh_key,
+                                          int64_t time_bucket);
+
+    // Random 16-byte nonce, base64-encoded, used as the challenge value
+    // in the discovery challenge/response handshake.
+    static std::string generate_discovery_nonce();
+
     // -- Signatures (strict, fail-closed) --------------------------------
     // Returns "ecdsa:<base64 DER signature>". Throws CryptoException on failure.
     static std::string sign(const std::string& data, const std::string& private_key_b64);

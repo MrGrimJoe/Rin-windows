@@ -6,6 +6,103 @@ diverged from that doc in several load-bearing ways. This core targets
 the **real Android wire protocol**, verified by reading source, not the
 doc's original protobuf/libsodium/libjuice plan.
 
+## Discovery hardening (this pass)
+
+Two things were deliberately left unfixed in earlier passes and flagged
+for later, because they're wire-protocol-level and need Android and
+Windows updated together to stay compatible: **auto-trust on
+discovery**, and the **cleartext beacon** (mesh name + device name sent
+unencrypted over UDP broadcast, readable by anyone on the LAN). Both are
+fixed now, on both platforms, in lockstep. See `rin-android/DESIGN_NOTES.md`'s
+matching section for the Kotlin side of this -- the two should be read
+together, since the whole point is that they agree byte-for-byte on the
+wire.
+
+**Beacon wire format bumped to v2.** The old beacon broadcast
+`{"mesh":<name>,"key":<pubkey>,"name":<device>,"port":...}` in the
+clear. v2 (`transport.hpp`/`transport.cpp`'s `UdpBeacon`) drops `mesh`
+and `name` entirely and replaces them with a `meshTag`:
+`base64(HKDF(meshKey, info="rin-beacon-tag-v1:"+bucket)[:9])`, where
+`bucket = unixSeconds / 300`. Only a device that already holds the real
+mesh secret can compute a matching tag, so a passive LAN observer now
+sees an opaque blob instead of "mesh 'Family' has a device named
+'Ali-Phone'". The tag rotates every 5 minutes so it isn't a long-lived
+tracking identifier either. This is a **coordinated breaking bump, not
+a soft migration** -- v1 and v2 peers simply can't discover each other.
+`CryptoEngine::derive_beacon_tag` must stay byte-for-byte identical to
+Android's `CryptoEngine.deriveBeaconTag` (same HKDF info string, same
+9-byte truncation) or the two platforms silently stop discovering each
+other -- confirmed identical for matching inputs during this pass (see
+"Not verified by a real build" below for exactly how, given this
+environment has no JVM). `stunIp`/`stunPort` stay in cleartext on the
+beacon -- they're NAT-traversal server hints, not identifying metadata
+about the mesh or device, so they don't need to move behind the
+handshake the way mesh name and device name did.
+
+**A beacon match no longer grants trust.** It used to: knowing the mesh
+name (or, now, guessing/replaying a meshTag) was sufficient to get
+auto-added to the trusted-devices map via `on_peer_discovered`'s old
+"auto-join" branch. Now a match only triggers a **discovery
+challenge/response handshake** over TCP (two new `PacketType` values,
+`DiscoveryChallenge`/`DiscoveryResponse`, wire strings
+`DISCOVERY_CHALLENGE`/`DISCOVERY_RESPONSE` -- must match Android's exactly)
+where each side proves it can actually encrypt/decrypt with the real
+mesh key -- not just produce a matching tag guess. Only on a valid
+echoed nonce does a peer get promoted from "seen" to trusted
+(`promote_to_trusted`), and that's also the point where its device name
+is finally revealed (encrypted, inside the response). A lexicographic
+tie-break on public keys (`local_public_key > peer.public_key` ->
+initiate) stops both sides from challenging each other simultaneously
+when they discover each other around the same time -- this comparison
+must match Android's `handleDiscoveredPeer` tie-break exactly, since
+both sides independently compute it and need to agree on who initiates.
+
+Concurrent discovery of the same peer from more than one signal at once
+is handled via `std::unordered_map::emplace`'s return value on
+`pending_challenges_` (reject if the key already exists), reserving the
+slot atomically rather than as a separate check-then-insert -- the same
+race Android closes with `ConcurrentHashMap.putIfAbsent`. A mismatched
+or undecryptable `DiscoveryResponse` deliberately does **not** clear the
+pending entry -- a stray or forged packet shouldn't be able to cancel a
+legitimate in-flight handshake by arriving first.
+
+Windows has no mDNS or BLE discovery rails at all, so unlike Android
+this fix only had one channel (the UDP beacon) to close -- no equivalent
+of Android's "still-cleartext Wi-Fi-Direct HELLO probe, deliberately out
+of scope" caveat applies here.
+
+**Test coverage:** `test_crypto.cpp` covers the new primitives --
+`derive_beacon_tag`'s determinism, rotation, and mesh-key-dependence;
+`generate_discovery_nonce` non-collision; a full encrypt/decrypt round
+trip for both challenge and response payloads through the real
+AES-256-GCM mesh key; and confirming a payload encrypted with the
+*wrong* mesh key fails to decrypt (the actual security property the
+whole handshake rests on). `test_discovery.cpp` goes further than
+Android could in this pass: it runs a **real two-party round trip** --
+a real `MeshEngine` instance's actual `send_discovery_challenge()` path
+connects over a real loopback TCP socket to a raw listener standing in
+for "the other device," which decrypts the captured packet for real and
+sends back a real, correctly-encrypted `DiscoveryResponse` -- rather
+than only hand-constructing packets and feeding them to the receive-side
+handlers directly (which it also does, for the challenged-side and
+rejection cases). A genuine two-full-`MeshEngine`-instances-broadcasting-
+real-UDP-beacons-at-each-other test was considered and deliberately
+**not** done: two `UdpBeacon`s in one process both binding port 45991
+has undefined-per-OS delivery semantics and would be a flaky test, not a
+more thorough one.
+
+**Not verified by a real build on the Android side in this pass** (their
+words, from `rin-android/DESIGN_NOTES.md`) -- no Gradle wrapper jar, no
+network access to Google's Maven repo in that environment. What *was*
+independently confirmed cross-platform: `derive_beacon_tag` with a fixed
+32-byte test key and bucket 100 produces `mX9hdhPSjPB+` on this
+(compiled, tested) Windows implementation -- which matches a value
+already independently verified elsewhere against the real, unmodified
+Android `CryptoEngine.kt` compiled and run against a real `org.json` for
+the same inputs. That's strong evidence the two derivations agree, even
+though this pass didn't run a live two-device test between an actual
+phone and this actual Windows binary.
+
 ## Why OpenSSL instead of libsodium
 
 The doc specified libsodium + Ed25519/X25519. Android's actual
@@ -48,6 +145,22 @@ support both.
   confirms the decoded bytes are byte-for-byte identical to the original
   join token JSON, and that the round-tripped JSON still parses back
   into a valid `QrJoinToken`.
+- **The new relay fallback tier** (`tests/test_relay.cpp`): a real
+  `RelayClient` registers with a real relay server over real loopback
+  TCP sockets (not mocked), and a packet sent via `send_via_relay()`
+  arrives at the other registered peer byte-for-byte unchanged, proving
+  the relay never touches the encrypted payload. Also covers the
+  "target never registered" case returning cleanly instead of hanging.
+  This test caught two real bugs during development worth knowing about
+  if you touch this code: (1) reusing a single-line-per-connection
+  `read_line()` helper for a connection that reads *multiple* lines
+  silently drops already-buffered bytes and hangs the next read — see
+  the comment on `read_line()` in `relay.cpp`; (2) on Linux, closing a
+  socket/acceptor fd from a different thread than the one blocked in
+  `recv()`/`accept()` on it does not reliably unblock that call —
+  `shutdown()` first is required. Both are fixed, but if you add more
+  relay-adjacent networking code, know that these are the two sharp
+  edges that bit this one.
 
 **NOT yet verified — needs a real device test:**
 - End-to-end interop against the actual Android app. This environment
@@ -76,6 +189,17 @@ support both.
   Windows currently means pasting the other device's token JSON as text
   into a dialog (`run_join_paste_dialog`) rather than pointing a webcam
   at the phone's QR. See "Next steps" below.
+- **The relay fallback tier's real-world/adversarial behavior.** What's
+  verified is the happy path over loopback (register, forward, deliver,
+  unchanged payload) plus one clean-failure case. NOT yet exercised:
+  behavior over an actual internet path (latency, partial reads,
+  reconnect-storms if a relay flaps); a hostile or overloaded relay
+  server (the reference `rin_relay` has no auth beyond "knows a public
+  key," no rate limiting, and no TLS — see the trust-model comment at
+  the top of `relay_server.cpp`); and interop with an Android-side relay
+  client, which does not exist yet (the Android app has no relay
+  fallback of its own — see the wire protocol note in `relay.hpp` for
+  why this doesn't affect the message format itself).
 
 ## Building the GUI on Windows
 
@@ -128,14 +252,11 @@ through MSVC yet:
   `SetClipboardData`, no `ShellExecute`). Deliberately deferred until the
   core handshake proves out against a real phone — see the `TODO` comments
   at the relevant switch cases.
-- **Auto-trust on UDP discovery.** `on_peer_discovered` adds any peer
-  broadcasting the same mesh name straight into the trusted-devices map,
-  matching Android's current `handleDiscoveredPeer` behavior. This is
-  *not* the doc's QR-is-the-security-boundary model — it works today
-  because unsigned/unencrypted traffic from an untrusted peer still gets
-  rejected downstream (signature verification, AES-GCM auth), but a
-  peer that merely knows the mesh name can still show up in your device
-  list. Worth tightening before this ships to real users.
+- **Auto-trust on UDP discovery -- FIXED.** See "Discovery hardening"
+  below. `on_peer_discovered` used to add any peer broadcasting the same
+  mesh name straight into the trusted-devices map; it now only refreshes
+  an already-trusted device's connection info, and new trust requires
+  proving mesh-secret possession via a challenge/response handshake.
 - **New TCP connection per packet, synchronous send.** Matches Android's
   current behavior exactly (simple, not fast). Fine for control traffic
   and clipboard sync; will need a persistent-connection or streaming path
@@ -175,11 +296,23 @@ through MSVC yet:
   modal behavior, tab order, and visual polish.
 - Wire up `on_packet_received`'s clipboard/browser-handoff cases to
   actual Win32 APIs.
-- BLE and Wi-Fi Direct rails (currently LAN/TCP + UDP discovery only).
-- Persist identity/trusted-devices to disk (currently in-memory only —
-  restarting `rin_console`/`rin_gui` forgets everything, unlike
-  Android's Room database). This also means the GUI's first-launch
-  chooser fires on every run right now — see the comment in
-  `Win32Shell::run()`.
+- BLE and Wi-Fi Direct rails (currently LAN/TCP + UDP discovery + the
+  new opt-in relay fallback — see `relay.hpp`). Realistically these two
+  are Android-only concepts; Windows' practical ceiling is LAN + relay,
+  which is now in place, rather than trying to replicate Wi-Fi Direct
+  group formation on a platform with no equivalent API.
+- An Android-side relay client speaking the same register/forward
+  protocol as `relay.hpp`/`relay_server.cpp`, so the relay fallback
+  actually helps cross-platform, not just Windows-to-Windows.
+- Harden `rin_relay` before pointing it at anything but your own
+  devices: TLS, real client authentication (right now "knowing a public
+  key" is sufficient to register as that key — see the trust-model
+  comment in `relay_server.cpp`), and rate limiting.
+- Persist identity/trusted-devices to disk — DONE (`persistence.cpp`,
+  SQLite-backed, covered by `test_persistence.cpp`). This note is being
+  left here crossed out rather than deleted since the GUI's first-launch
+  chooser still has an open bug around re-firing on every run (see the
+  comment in `Win32Shell::run()`) — the underlying storage works, the
+  GUI's use of it on startup is what still needs the follow-up.
 - System tray icon / minimize-to-tray, since a background mesh app
   shouldn't need a visible window at all times once this is polished.

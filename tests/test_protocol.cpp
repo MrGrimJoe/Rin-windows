@@ -173,10 +173,14 @@ void run_qr_tests();
 void run_audit_logger_tests();
 void run_persistence_tests();
 void run_file_transfer_tests();
+void run_relay_tests();
+void run_discovery_tests();
 int g_qr_test_failures();
 int g_audit_test_failures();
 int g_persistence_test_failures();
 int g_file_transfer_test_failures();
+int g_relay_test_failures();
+int g_discovery_test_failures();
 
 int main() {
     // run 39's rtc-debug log crashed with a bare "abort() has been
@@ -231,10 +235,13 @@ int main() {
     run_audit_logger_tests();
     run_persistence_tests();
     run_file_transfer_tests();
+    run_relay_tests();
+    run_discovery_tests();
 
     int total_failures = g_crypto_test_failures() + g_protocol_test_failures() +
                           g_qr_test_failures() + g_audit_test_failures() +
-                          g_persistence_test_failures() + g_file_transfer_test_failures();
+                          g_persistence_test_failures() + g_file_transfer_test_failures() +
+                          g_relay_test_failures() + g_discovery_test_failures();
     std::cout << "\n========================================\n";
     if (total_failures == 0) {
         std::cout << "ALL TESTS PASSED.\n";

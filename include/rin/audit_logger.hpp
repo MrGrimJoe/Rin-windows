@@ -100,6 +100,20 @@ public:
     void log_udp_beacon_discovered(const std::string& device_name, const std::string& host, int port,
                                      const std::optional<std::string>& mesh_name);
 
+    // -- Discovery hardening (beacon v2 + challenge/response) ------------
+    // Deliberately no device_name/mesh_name in log_discovery_beacon_matched --
+    // at that point all we know is "a beacon's rotating tag matched ours",
+    // NOT who this is. That's only established (and only then worth
+    // logging by name) once the challenge/response below actually
+    // succeeds. Mirrors Android's MeshAuditLogger.logDiscoveryBeaconMatched
+    // et al. exactly.
+    void log_discovery_beacon_matched(const std::string& host, int port, const std::string& peer_key);
+    void log_discovery_challenge_sent(const std::string& host, int port, const std::string& peer_key);
+    void log_discovery_verified(const std::string& device_name, const std::string& peer_key,
+                                  const std::string& host, int port);
+    void log_discovery_rejected(const std::string& host, int port,
+                                  const std::optional<std::string>& peer_key, const std::string& reason);
+
     void log_handshake_initiated(const std::string& target_ip, const std::string& peer_name,
                                    const std::optional<std::string>& ephemeral_token);
     void log_handshake_completed(const std::string& peer_name, const std::string& peer_key,

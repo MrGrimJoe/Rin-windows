@@ -55,7 +55,16 @@ enum class PacketType {
     FileComplete,
     Revocation,
     Heartbeat,
-    Ack
+    Ack,
+    // NEW -- discovery hardening. Sent point-to-point over TCP once a UDP
+    // beacon's meshTag looks like it might be ours; both packets' payloads
+    // are mesh-key AES-256-GCM ciphertext (never plaintext), so a peer
+    // that can't decrypt them (doesn't hold the real mesh secret) never
+    // gets promoted to trusted. See MeshEngine's discovery
+    // challenge/response handling. Wire strings must match Android's
+    // PacketType.DISCOVERY_CHALLENGE/DISCOVERY_RESPONSE exactly.
+    DiscoveryChallenge,
+    DiscoveryResponse
 };
 
 const char* to_wire_string(PacketType type);

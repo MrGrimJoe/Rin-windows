@@ -8,6 +8,7 @@
 
 #include <asio.hpp>
 
+#include <cstdlib>
 #include <iostream>
 #include <sstream>
 #include <thread>
@@ -27,7 +28,12 @@ void print_help() {
               << "  events             Show recent mesh events\n"
               << "  clipboard <text>   Broadcast text to the mesh as a clipboard sync\n"
               << "  sendfile <key> <path>  Send a file to a specific device (use devices to get key)\n"
-              << "  quit               Stop and exit\n\n";
+              << "  quit               Stop and exit\n\n"
+              << "Relay fallback (NEW, opt-in, off by default): set RIN_RELAY_HOST (and\n"
+              << "optionally RIN_RELAY_PORT, default 45992) before launching to register\n"
+              << "with a relay -- e.g. one you run yourself via the rin_relay binary --\n"
+              << "so devices with no direct LAN path to each other still have one. Safe\n"
+              << "to leave unset: behavior is identical to before when it's not set.\n\n";
 }
 
 const char* platform_name(rin::PlatformType p) {
@@ -82,6 +88,22 @@ int main() {
         } catch (const std::exception& e) {
             std::cerr << "Fatal: failed to create mesh: " << e.what() << "\n";
             return 1;
+        }
+    }
+
+    if (const char* relay_host_env = std::getenv("RIN_RELAY_HOST")) {
+        if (*relay_host_env) {
+            int relay_port = 45992;
+            if (const char* relay_port_env = std::getenv("RIN_RELAY_PORT")) {
+                try {
+                    relay_port = std::stoi(relay_port_env);
+                } catch (const std::exception&) {
+                    std::cerr << "Warning: RIN_RELAY_PORT is not a valid number, using default "
+                              << relay_port << "\n";
+                }
+            }
+            engine.configure_relay(relay_host_env, relay_port);
+            std::cout << "Relay fallback configured: " << relay_host_env << ":" << relay_port << "\n";
         }
     }
 

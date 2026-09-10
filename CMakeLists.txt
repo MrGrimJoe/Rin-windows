@@ -176,6 +176,7 @@ add_library(rin_core STATIC
     src/audit_logger.cpp
     src/persistence.cpp
     src/file_transfer.cpp
+    src/relay.cpp
 )
 
 # Diagnostic-only: the rin_tests binary crashes with 0xc0000409
@@ -278,6 +279,22 @@ target_link_libraries(rin_console PRIVATE rin_core)
 # built fine. add_dependencies() forces the explicit build-order edge that
 # target_link_libraries alone wasn't producing for this specific target.
 add_dependencies(rin_console sqlite3_lib)
+
+# --- Relay server (cross-platform, standalone, no rin_core dependency) --
+# rin_relay is a dumb, self-hostable forwarder for the opt-in relay
+# fallback tier (see include/rin/relay.hpp). It only needs asio + nlohmann
+# json -- deliberately NOT linked against rin_core, since it never touches
+# crypto/persistence/etc. and should stay trivially auditable on its own.
+add_executable(rin_relay src/relay_server.cpp)
+target_include_directories(rin_relay PRIVATE include)
+target_compile_definitions(rin_relay PRIVATE ASIO_STANDALONE ASIO_NO_DEPRECATED)
+target_link_libraries(rin_relay PRIVATE asio_headers nlohmann_json::nlohmann_json)
+if(WIN32)
+    target_link_libraries(rin_relay PRIVATE ws2_32 wsock32)
+endif()
+if(UNIX)
+    target_link_libraries(rin_relay PRIVATE Threads::Threads)
+endif()
 
 # --- Rin Windows GUI (Windows-only) ------------------------------------
 if(WIN32)

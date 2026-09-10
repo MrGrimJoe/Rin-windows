@@ -6,6 +6,7 @@
 #include <iostream>
 
 #include "rin/audit_logger.hpp"
+#include "rin/crypto.hpp"
 
 using nlohmann::json;
 using asio::ip::tcp;
@@ -112,6 +113,16 @@ void TcpTransport::handle_connection(tcp::socket socket) {
     try {
         socket.set_option(asio::ip::tcp::no_delay(true));
 
+        std::string remote_ip;
+        try {
+            remote_ip = socket.remote_endpoint().address().to_string();
+        } catch (const std::exception&) {
+            // Socket already closed/reset before we could read the peer
+            // address -- proceed with an empty remote_ip rather than
+            // failing the whole connection; only the discovery
+            // challenge/response reply path actually needs it.
+        }
+
         std::string line = read_line(socket);
         if (line.empty()) return;
 
@@ -138,7 +149,7 @@ void TcpTransport::handle_connection(tcp::socket socket) {
         std::string ack_line = ack.dump() + "\n";
         asio::write(socket, asio::buffer(ack_line));
 
-        if (on_packet_) on_packet_(packet);
+        if (on_packet_) on_packet_(packet, remote_ip);
     } catch (const std::exception& e) {
         std::cerr << "[TcpTransport] failed to handle incoming packet: " << e.what() << "\n";
     }
@@ -223,13 +234,14 @@ UdpBeacon::UdpBeacon(asio::io_context& io) : io_(io), socket_(io) {}
 
 UdpBeacon::~UdpBeacon() { stop(); }
 
-void UdpBeacon::start(const std::string& mesh_name, const std::string& public_key,
-                       const std::string& device_name, int tcp_port,
+void UdpBeacon::start(const std::array<uint8_t, 32>& mesh_key, const std::string& public_key,
+                       int tcp_port, const std::string& stun_ip, int stun_port,
                        PeerDiscoveredHandler on_peer) {
-    mesh_name_ = mesh_name;
+    mesh_key_ = mesh_key;
     public_key_ = public_key;
-    device_name_ = device_name;
     tcp_port_ = tcp_port;
+    stun_ip_ = stun_ip;
+    stun_port_ = stun_port;
     on_peer_ = std::move(on_peer);
     running_ = true;
 
@@ -271,20 +283,27 @@ void UdpBeacon::listen_loop() {
             try {
                 json j = json::parse(message);
                 if (j.value("magic", "") != "RIN_BEACON") continue;
+                // v1 beacons (cleartext mesh/name fields, no meshTag) are
+                // no longer understood -- see the wire format comment
+                // at the top of this file. A v1 peer simply won't be
+                // discovered until it's updated too (coordinated
+                // breaking bump, not a soft migration).
+                if (j.value("v", 1) < 2) continue;
 
-                std::string mesh = j.value("mesh", "");
+                std::string mesh_tag = j.value("meshTag", "");
                 std::string key = j.value("key", "");
-                std::string name = j.value("name", "");
-                int port = j.value("port", kDefaultTcpPort);
+                if (mesh_tag.empty() || key.empty()) continue;
 
                 // Disregard our own broadcasts, matching Android.
-                if (!key.empty() && key != public_key_ && on_peer_) {
+                if (key != public_key_ && on_peer_) {
                     DiscoveredPeer peer;
-                    peer.mesh_name = mesh;
+                    peer.mesh_tag = mesh_tag;
                     peer.public_key = key;
-                    peer.device_name = name;
                     peer.ip = sender.address().to_string();
-                    peer.port = port;
+                    peer.port = j.value("port", kDefaultTcpPort);
+                    peer.stun_ip = j.value("stunIp", "");
+                    peer.stun_port = j.value("stunPort", 0);
+                    peer.timestamp_ms = j.value("ts", static_cast<int64_t>(0));
                     on_peer_(peer);
                 }
             } catch (const json::exception&) {
@@ -299,12 +318,17 @@ void UdpBeacon::listen_loop() {
 void UdpBeacon::broadcast_loop() {
     while (running_) {
         try {
+            int64_t bucket = now_millis() / 1000 / kBeaconTagWindowSeconds;
+            std::string mesh_tag = CryptoEngine::derive_beacon_tag(mesh_key_, bucket);
+
             json j;
             j["magic"] = "RIN_BEACON";
-            j["mesh"] = mesh_name_;
+            j["v"] = 2;
+            j["meshTag"] = mesh_tag;
             j["key"] = public_key_;
-            j["name"] = device_name_;
             j["port"] = tcp_port_;
+            if (!stun_ip_.empty()) j["stunIp"] = stun_ip_;
+            if (stun_port_ != 0) j["stunPort"] = stun_port_;
             j["ts"] = now_millis();
 
             std::string payload = j.dump();

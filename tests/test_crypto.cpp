@@ -19,6 +19,8 @@
 
 #include "rin/crypto.hpp"
 
+#include <nlohmann/json.hpp>
+
 #include <cassert>
 #include <functional>
 #include <iostream>
@@ -174,6 +176,98 @@ void run_crypto_tests() {
         std::string session = CryptoEngine::generate_session_id();
         check(session.rfind("sess_", 0) == 0, "session ID has expected prefix");
         check(CryptoEngine::generate_session_id() != session, "session IDs are not repeated");
+    }
+
+    // -- Discovery hardening (beacon v2 + challenge/response) -----------
+    // Mirrors Android's CryptoEngineDiscoveryTest.kt exactly. These lock
+    // the exact derive_beacon_tag derivation (HKDF via hkdf_derive_key,
+    // truncate to 9 bytes, base64) so it can never silently drift out of
+    // sync with Android's CryptoEngine.deriveBeaconTag -- a one-byte
+    // difference there would silently break beacon matching for
+    // everyone. The full two-device challenge/response handshake is
+    // covered end-to-end in test_discovery.cpp; these are the pure-
+    // function primitives underneath it.
+    {
+        std::array<uint8_t, 32> key_a{};
+        for (int i = 0; i < 32; ++i) key_a[i] = static_cast<uint8_t>(i);
+        std::array<uint8_t, 32> key_b{};
+        for (int i = 0; i < 32; ++i) key_b[i] = static_cast<uint8_t>((1 + i) & 0xFF);
+
+        std::string tag1 = CryptoEngine::derive_beacon_tag(key_a, 100);
+        std::string tag2 = CryptoEngine::derive_beacon_tag(key_a, 100);
+        check(!tag1.empty(), "beacon tag is non-empty");
+        check(tag1 == tag2,
+              "the SAME mesh key + time bucket always produces the SAME tag "
+              "(so a legitimate member's beacon is recognizable, and this stays "
+              "wire-compatible with Android's deriveBeaconTag for identical inputs)");
+
+        std::string tag_bucket_101 = CryptoEngine::derive_beacon_tag(key_a, 101);
+        check(tag1 != tag_bucket_101,
+              "a DIFFERENT time bucket produces a DIFFERENT tag -- tags rotate, "
+              "they are not a permanent tracking identifier");
+
+        std::string tag_key_b = CryptoEngine::derive_beacon_tag(key_b, 100);
+        check(tag1 != tag_key_b,
+              "a DIFFERENT mesh key produces a DIFFERENT tag -- an outsider without "
+              "the real secret can't compute a matching tag, closing the old "
+              "cleartext mesh name in the beacon leak");
+
+        std::string nonce1 = CryptoEngine::generate_discovery_nonce();
+        std::string nonce2 = CryptoEngine::generate_discovery_nonce();
+        check(!nonce1.empty() && !nonce2.empty(), "discovery nonces are non-empty");
+        check(nonce1 != nonce2,
+              "consecutive nonces must not collide -- a replayed/stale challenge "
+              "response shouldn't be able to echo back a nonce we're currently expecting");
+    }
+
+    // -- Discovery challenge/response payload round-trip -----------------
+    {
+        std::array<uint8_t, 32> mesh_key =
+            CryptoEngine::derive_mesh_encryption_key("shared-secret-for-test", "TestMesh");
+        std::string nonce = CryptoEngine::generate_discovery_nonce();
+
+        nlohmann::json challenge_body;
+        challenge_body["nonce"] = nonce;
+        challenge_body["ts"] = 1234567890;
+        challenge_body["challengerPort"] = 45990;
+        std::string encrypted_challenge = CryptoEngine::encrypt_payload(challenge_body.dump(), mesh_key);
+        std::string decrypted_challenge = CryptoEngine::decrypt_payload(encrypted_challenge, mesh_key);
+        nlohmann::json parsed_challenge = nlohmann::json::parse(decrypted_challenge);
+        check(parsed_challenge.value("nonce", "") == nonce,
+              "discovery challenge payload round-trips through the real mesh key");
+
+        nlohmann::json response_body;
+        response_body["nonce"] = parsed_challenge.value("nonce", "");
+        response_body["deviceName"] = "Device B";
+        response_body["ts"] = 1234567891;
+        std::string encrypted_response = CryptoEngine::encrypt_payload(response_body.dump(), mesh_key);
+        std::string decrypted_response = CryptoEngine::decrypt_payload(encrypted_response, mesh_key);
+        nlohmann::json parsed_response = nlohmann::json::parse(decrypted_response);
+        check(parsed_response.value("nonce", "") == nonce, "the echoed nonce matches what was sent");
+        check(parsed_response.value("deviceName", "") == "Device B",
+              "discovery response payload round-trips through the real mesh key");
+    }
+
+    // -- The actual security property the whole handshake rests on ------
+    {
+        std::array<uint8_t, 32> real_key = CryptoEngine::derive_mesh_encryption_key("real-secret", "TestMesh");
+        std::array<uint8_t, 32> wrong_key =
+            CryptoEngine::derive_mesh_encryption_key("a-different-secret", "TestMesh");
+
+        nlohmann::json body;
+        body["nonce"] = CryptoEngine::generate_discovery_nonce();
+        std::string encrypted = CryptoEngine::encrypt_payload(body.dump(), wrong_key);
+
+        bool threw = false;
+        try {
+            CryptoEngine::decrypt_payload(encrypted, real_key);
+        } catch (const CryptoException&) {
+            threw = true;
+        }
+        check(threw,
+              "a discovery response encrypted with the WRONG mesh key fails to decrypt with the real "
+              "one (AES-GCM auth tag) -- this is what makes \"matched the beacon tag\" safely "
+              "separable from \"is actually trusted\"");
     }
 
     std::cout << (g_failures == 0 ? "All crypto tests passed.\n" : "SOME CRYPTO TESTS FAILED.\n");

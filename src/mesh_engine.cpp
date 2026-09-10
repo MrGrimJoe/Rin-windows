@@ -19,6 +19,10 @@
 
 #include "rin/audit_logger.hpp"
 
+#include <nlohmann/json.hpp>
+
+using nlohmann::json;
+
 namespace rin {
 
 namespace {
@@ -29,7 +33,7 @@ int64_t now_millis() {
 }
 }  // namespace
 
-MeshEngine::MeshEngine(asio::io_context& io) : io_(io), tcp_(io), udp_(io) {
+MeshEngine::MeshEngine(asio::io_context& io) : io_(io), tcp_(io), udp_(io), relay_(io) {
     file_transfer_ = std::make_unique<FileTransferEngine>(
         [this](const ReceivedFileRecord& rec) {
             if (rec.local_file_path.empty()) {
@@ -149,21 +153,71 @@ void MeshEngine::create_initial_mesh(const std::string& mesh_name, const std::st
               identity_.local_fingerprint + ")");
 }
 
+void MeshEngine::configure_relay(const std::string& host, int port) {
+    relay_host_ = host;
+    relay_port_ = port;
+}
+
 void MeshEngine::start() {
     identity_.port = tcp_.start(
-        [this](const MeshPacket& packet) { on_packet_received(packet); },
+        [this](const MeshPacket& packet, const std::string& remote_ip) {
+            on_packet_received(packet, remote_ip);
+        },
         [this](const MeshPacket& packet) { return verify_packet_signature(packet); });
 
-    udp_.start(identity_.mesh_name, identity_.local_public_key, identity_.local_device_name,
-               identity_.port, [this](const DiscoveredPeer& peer) { on_peer_discovered(peer); });
+    std::array<uint8_t, 32> mesh_key =
+        CryptoEngine::derive_mesh_encryption_key(identity_.mesh_secret, identity_.mesh_name);
+    udp_.start(mesh_key, identity_.local_public_key, identity_.port, /*stun_ip=*/"",
+               /*stun_port=*/0, [this](const DiscoveredPeer& peer) { on_peer_discovered(peer); });
+
+    // Relay registration uses the exact same packet-verification and
+    // dispatch path as a direct TCP connection (on_packet_received /
+    // verify_packet_signature) -- a packet arriving via relay is treated
+    // identically to one arriving via LAN once it's been signature-
+    // checked, except with an empty remote_ip (relay-delivered packets
+    // have no direct address to reply on -- see handle_discovery_challenge).
+    // Entirely no-op if configure_relay() was never called.
+    relay_.start(
+        relay_host_, relay_port_, identity_.local_public_key,
+        [this](const MeshPacket& packet, const std::string& remote_ip) {
+            on_packet_received(packet, remote_ip);
+        },
+        [this](const MeshPacket& packet) { return verify_packet_signature(packet); });
 
     log_event("Listening on TCP " + std::to_string(identity_.port) + ", UDP beacon on " +
-              std::to_string(kUdpBeaconPort));
+              std::to_string(kUdpBeaconPort) +
+              (relay_.is_configured()
+                   ? ", relay fallback via " + relay_.host() + ":" + std::to_string(relay_.port())
+                   : ""));
 }
 
 void MeshEngine::stop() {
     tcp_.stop();
     udp_.stop();
+    relay_.stop();
+}
+
+std::optional<int64_t> MeshEngine::send_with_fallback(const TrustedDevice& device,
+                                                        const MeshPacket& packet) {
+    if (device.ip_address.has_value()) {
+        auto latency = tcp_.send_packet(*device.ip_address, device.port, packet);
+        if (latency.has_value()) return latency;
+    }
+
+    if (!relay_.is_configured()) return std::nullopt;
+
+    MeshPacket relay_packet = packet;
+    relay_packet.rail = TransportRail::Relay;
+    auto latency = relay_.send_via_relay(device.public_key, relay_packet);
+    if (latency.has_value()) {
+        MeshAuditLogger::instance().log_connection_established("Relay", relay_.host(),
+                                                                  relay_.port(), packet.sender_name);
+    } else {
+        MeshAuditLogger::instance().log_connection_failed(
+            "Relay", relay_.host(), relay_.port(), "relay forward failed or peer not registered",
+            packet.sender_name);
+    }
+    return latency;
 }
 
 std::string MeshEngine::build_join_token_json() const {
@@ -299,7 +353,7 @@ void MeshEngine::broadcast_clipboard(const std::string& text) {
         packet.rail = TransportRail::Lan;
         packet.timestamp_ms = now_millis();
 
-        tcp_.send_packet(*device.ip_address, device.port, packet);
+        send_with_fallback(device, packet);
     }
     log_event("Broadcast clipboard to " + std::to_string(targets.size()) + " device(s)");
 }
@@ -340,7 +394,7 @@ void MeshEngine::send_browser_handoff(const std::string& url,
         packet.signature = sig;
         packet.rail = TransportRail::Lan;
         packet.timestamp_ms = now_millis();
-        tcp_.send_packet(*device.ip_address, device.port, packet);
+        send_with_fallback(device, packet);
     };
 
     if (target.has_value()) {
@@ -392,7 +446,7 @@ void MeshEngine::revoke_device(const std::string& public_key) {
         packet.signature = sig;
         packet.rail = TransportRail::Lan;
         packet.timestamp_ms = now_millis();
-        tcp_.send_packet(*device.ip_address, device.port, packet);
+        send_with_fallback(device, packet);
     }
 
     {
@@ -478,7 +532,24 @@ std::string MeshEngine::decrypt_packet_payload(const MeshPacket& packet) const {
     }
 }
 
-void MeshEngine::on_packet_received(const MeshPacket& packet) {
+void MeshEngine::on_packet_received(const MeshPacket& packet, const std::string& remote_ip) {
+    // Discovery challenge/response bypass normal decrypt entirely (their
+    // payloads ARE mesh-key ciphertext, but via the plain derived mesh
+    // key, not the per-peer ECDH session key the generic path below would
+    // reach for since these packets carry a targetKey). Each has its own
+    // attempt-and-see decrypt with its own fail-closed handling, not a
+    // hard "drop the whole packet" the way a generic broadcast-decrypt
+    // failure gets treated. Matches Android's identical bypass in
+    // handleIncomingConnection/processIncomingPacket.
+    if (packet.type == PacketType::DiscoveryChallenge) {
+        handle_discovery_challenge(packet, remote_ip);
+        return;
+    }
+    if (packet.type == PacketType::DiscoveryResponse) {
+        handle_discovery_response(packet, remote_ip);
+        return;
+    }
+
     std::string plain;
     try {
         plain = decrypt_packet_payload(packet);
@@ -590,53 +661,295 @@ void MeshEngine::on_packet_received(const MeshPacket& packet) {
             break;
         case PacketType::Ack:
             break;
+        case PacketType::DiscoveryChallenge:
+        case PacketType::DiscoveryResponse:
+            // Unreachable in practice -- both are intercepted and
+            // returned-from at the top of this function, before
+            // decrypt_packet_payload() even runs. Listed here only so
+            // this switch stays exhaustive (no -Wswitch warning) if that
+            // early-return logic is ever refactored.
+            break;
     }
 }
 
 void MeshEngine::on_peer_discovered(const DiscoveredPeer& peer) {
-    if (peer.mesh_name != identity_.mesh_name) return;  // different mesh entirely -- ignore
+    // SECURITY FIX (was: auto-trust any peer whose beacon signature
+    // verified against ITSELF -- see git history for the prior
+    // fingerprint+signature design this replaces). A meshTag match is
+    // only a HINT that a beacon is probably from our mesh; it grants
+    // nothing on its own. If the sender's public key is already in our
+    // trust store, this just refreshes its connection info. If it's
+    // genuinely new, this hands off to the discovery challenge/response
+    // handshake below, which requires the peer to prove it holds the
+    // real mesh secret (by decrypting a nonce we encrypt with it) before
+    // anything gets added to the trust store. Mirrors Android's
+    // onPeerDiscoveredNeedsVerification exactly.
+    std::array<uint8_t, 32> mesh_key =
+        CryptoEngine::derive_mesh_encryption_key(identity_.mesh_secret, identity_.mesh_name);
 
-    std::lock_guard<std::mutex> lock(devices_mutex_);
+    int64_t now_bucket = now_millis() / 1000 / kBeaconTagWindowSeconds;
+    bool tag_matches = false;
+    for (int64_t bucket = now_bucket - 1; bucket <= now_bucket + 1; ++bucket) {
+        if (CryptoEngine::derive_beacon_tag(mesh_key, bucket) == peer.mesh_tag) {
+            tag_matches = true;
+            break;
+        }
+    }
+    if (!tag_matches) return;  // not our mesh (or a stale/foreign tag) -- ignore, no logging (very common)
+
+    if (peer.public_key.empty()) return;
+
+    std::unique_lock<std::mutex> lock(devices_mutex_);
     auto it = devices_.find(peer.public_key);
     if (it != devices_.end()) {
+        // Already trusted from a prior handshake -- just refresh
+        // reachability, no new proof needed.
         it->second.ip_address = peer.ip;
         it->second.port = peer.port;
         it->second.connection_state = ConnectionState::Connected;
+        TrustedDevice updated = it->second;
+        lock.unlock();
+        if (store_) {
+            try {
+                store_->upsert_device(updated);
+            } catch (const PersistenceException& e) {
+                MeshAuditLogger::instance().log(AuditLevel::SecurityWarning, AuditCategory::Connection,
+                                                  "Failed to persist updated device: " + std::string(e.what()));
+            }
+        }
+        return;
+    }
+    lock.unlock();
+
+    // Tie-break: if both sides see each other's beacon around the same
+    // time, both would otherwise send a challenge -- harmless but
+    // wasteful and racy to reason about. Only the side whose own public
+    // key sorts lexicographically greater initiates; the other side
+    // waits to receive a challenge instead. Must match Android's
+    // tie-break exactly (same comparison, same direction).
+    if (!(identity_.local_public_key > peer.public_key)) {
+        return;  // waiting for their challenge instead
+    }
+
+    std::string nonce = CryptoEngine::generate_discovery_nonce();
+    {
+        std::lock_guard<std::mutex> plock(pending_challenges_mutex_);
+        // emplace (not operator[]/assignment) so a concurrent caller that
+        // already reserved this slot doesn't get overwritten -- mirrors
+        // Android's ConcurrentHashMap.putIfAbsent race-closing behavior.
+        auto result = pending_challenges_.emplace(
+            peer.public_key, PendingChallenge{nonce, peer.ip, peer.port, now_millis()});
+        if (!result.second) return;  // someone else's concurrent call already reserved this slot
+    }
+
+    MeshAuditLogger::instance().log_discovery_beacon_matched(peer.ip, peer.port, peer.public_key);
+    send_discovery_challenge(peer.ip, peer.port, peer.public_key, nonce);
+}
+
+void MeshEngine::send_discovery_challenge(const std::string& ip, int port,
+                                            const std::string& peer_public_key,
+                                            const std::string& nonce) {
+    std::array<uint8_t, 32> mesh_key =
+        CryptoEngine::derive_mesh_encryption_key(identity_.mesh_secret, identity_.mesh_name);
+
+    json body;
+    body["nonce"] = nonce;
+    body["ts"] = now_millis();
+    // Every packet on this transport is one-shot (a fresh outbound TCP
+    // connection per packet) -- there is no open connection to write a
+    // reply on. The responder has to open its OWN new connection back to
+    // us, which means it needs to know our real listening port, not just
+    // our IP. Carrying it inside the encrypted body also means an
+    // eavesdropper who can't decrypt learns nothing extra beyond what
+    // the beacon already exposed.
+    body["challengerPort"] = identity_.port;
+
+    std::string encrypted;
+    try {
+        encrypted = CryptoEngine::encrypt_payload(body.dump(), mesh_key);
+    } catch (const CryptoException&) {
         return;
     }
 
-    // NOTE: this auto-trusts any peer broadcasting our mesh name, matching
-    // Android's handleDiscoveredPeer today. That's fine for the milestone
-    // (mesh name isn't the trust boundary -- signature verification is,
-    // and untrusted peers still can't produce valid signed/encrypted
-    // traffic without the mesh secret or an ECDH-derivable key) but is
-    // worth revisiting before broadcast features assume "in device list"
-    // means "actually vetted via QR".
+    MeshPacket packet;
+    packet.session_id = CryptoEngine::generate_session_id();
+    packet.sequence = next_sequence();
+    packet.type = PacketType::DiscoveryChallenge;
+    packet.sender_key = identity_.local_public_key;
+    packet.sender_name = identity_.local_device_name;
+    packet.target_key = peer_public_key;
+    packet.payload = encrypted;
+    packet.signature = CryptoEngine::sign(encrypted, identity_.local_private_key);
+    packet.rail = TransportRail::Lan;
+    packet.timestamp_ms = now_millis();
+
+    tcp_.send_packet(ip, port, packet);  // fire-and-forget: the challenger doesn't need an ACK,
+                                          // only the encrypted DiscoveryResponse itself
+    MeshAuditLogger::instance().log_discovery_challenge_sent(ip, port, peer_public_key);
+}
+
+void MeshEngine::handle_discovery_challenge(const MeshPacket& packet, const std::string& remote_ip) {
+    std::array<uint8_t, 32> mesh_key =
+        CryptoEngine::derive_mesh_encryption_key(identity_.mesh_secret, identity_.mesh_name);
+
+    std::string decrypted;
+    try {
+        decrypted = CryptoEngine::decrypt_payload(packet.payload, mesh_key);
+    } catch (const CryptoException& e) {
+        MeshAuditLogger::instance().log_discovery_rejected(
+            remote_ip, 0, packet.sender_key,
+            std::string("could not decrypt DISCOVERY_CHALLENGE payload with our mesh key: ") + e.what());
+        return;
+    }
+
+    std::string nonce;
+    int challenger_port = kDefaultTcpPort;
+    try {
+        json body = json::parse(decrypted);
+        nonce = body.value("nonce", "");
+        challenger_port = body.value("challengerPort", kDefaultTcpPort);
+    } catch (const json::exception&) {
+        return;  // malformed decrypted body -- ignore, matches Android
+    }
+    if (nonce.empty()) return;
+    if (remote_ip.empty()) {
+        MeshAuditLogger::instance().log_discovery_rejected(
+            "", 0, packet.sender_key, "no direct remote address to reply to (relay-delivered?)");
+        return;
+    }
+
+    json response_body;
+    response_body["nonce"] = nonce;  // echo back exactly what we decrypted
+    response_body["ts"] = now_millis();
+    response_body["deviceName"] = identity_.local_device_name;
+
+    std::string encrypted;
+    try {
+        encrypted = CryptoEngine::encrypt_payload(response_body.dump(), mesh_key);
+    } catch (const CryptoException&) {
+        return;
+    }
+
+    MeshPacket response;
+    response.session_id = packet.session_id;
+    response.sequence = next_sequence();
+    response.type = PacketType::DiscoveryResponse;
+    response.sender_key = identity_.local_public_key;
+    response.sender_name = identity_.local_device_name;
+    response.target_key = packet.sender_key;
+    response.payload = encrypted;
+    response.signature = CryptoEngine::sign(encrypted, identity_.local_private_key);
+    response.rail = TransportRail::Lan;
+    response.timestamp_ms = now_millis();
+    tcp_.send_packet(remote_ip, challenger_port, response);
+
+    // We now know enough to trust THEM too, symmetrically: they proved
+    // they hold the mesh secret by sending a challenge we could decrypt
+    // in the first place (only a real member could have derived the same
+    // mesh key to construct it). Promote immediately rather than waiting
+    // on a challenge of our own -- the tie-break rule means we are, by
+    // construction, the side that does NOT initiate here, so this is the
+    // only place our side of the pair gets promoted.
+    promote_to_trusted(packet.sender_key, packet.sender_name, remote_ip, challenger_port);
+}
+
+void MeshEngine::handle_discovery_response(const MeshPacket& packet, const std::string& remote_ip) {
+    PendingChallenge pending;
+    {
+        std::lock_guard<std::mutex> lock(pending_challenges_mutex_);
+        auto it = pending_challenges_.find(packet.sender_key);
+        if (it == pending_challenges_.end()) {
+            // No outstanding challenge for this key -- either a stale/
+            // duplicate response, or an unsolicited one. Fail closed:
+            // ignore rather than trust.
+            MeshAuditLogger::instance().log_discovery_rejected(
+                remote_ip, 0, packet.sender_key, "DISCOVERY_RESPONSE with no matching outstanding challenge");
+            return;
+        }
+        pending = it->second;
+    }
+
+    std::array<uint8_t, 32> mesh_key =
+        CryptoEngine::derive_mesh_encryption_key(identity_.mesh_secret, identity_.mesh_name);
+
+    std::string decrypted;
+    try {
+        decrypted = CryptoEngine::decrypt_payload(packet.payload, mesh_key);
+    } catch (const CryptoException& e) {
+        // Deliberately do NOT remove the pending entry here -- with a
+        // reserved slot per peer, there should only ever be one
+        // legitimate outstanding challenge, so a response that fails to
+        // decrypt is a stray/replayed/forged packet, not the real
+        // answer. Removing on a bad response would let an attacker DoS a
+        // legitimate in-flight handshake just by lobbing garbage back at
+        // the challenger first.
+        MeshAuditLogger::instance().log_discovery_rejected(
+            pending.ip, pending.port, packet.sender_key,
+            std::string("could not decrypt DISCOVERY_RESPONSE payload with our mesh key: ") + e.what());
+        return;
+    }
+
+    std::string echoed_nonce;
+    std::string device_name;
+    try {
+        json body = json::parse(decrypted);
+        echoed_nonce = body.value("nonce", "");
+        device_name = body.value("deviceName", "");
+    } catch (const json::exception&) {
+        return;  // same reasoning as above -- don't remove on a malformed reply
+    }
+
+    if (echoed_nonce.empty() || echoed_nonce != pending.nonce) {
+        // Same reasoning again: a mismatched nonce means THIS response
+        // isn't the one we're waiting for, not that the real one won't
+        // still arrive -- the pending entry stays.
+        MeshAuditLogger::instance().log_discovery_rejected(pending.ip, pending.port, packet.sender_key,
+                                                              "echoed nonce did not match what we sent");
+        return;
+    }
+
+    // Genuine match -- consume it now (before promoting), so a
+    // duplicate/replayed copy of this same valid response can't
+    // re-trigger anything once we've already acted on it.
+    {
+        std::lock_guard<std::mutex> lock(pending_challenges_mutex_);
+        pending_challenges_.erase(packet.sender_key);
+    }
+    std::string resolved_name = device_name.empty() ? "Unknown Device" : device_name;
+    std::string ip = remote_ip.empty() ? pending.ip : remote_ip;
+    promote_to_trusted(packet.sender_key, resolved_name, ip, pending.port);
+}
+
+void MeshEngine::promote_to_trusted(const std::string& public_key, const std::string& device_name,
+                                      const std::string& ip, int port) {
     TrustedDevice device;
-    device.public_key = peer.public_key;
-    device.name = peer.device_name;
-    device.platform = PlatformType::Android;  // discovered peers are Android for now; refine once cross-Windows discovery is tested
+    device.public_key = public_key;
+    device.name = device_name;
+    device.platform = PlatformType::Android;  // best-effort guess; refine once cross-platform discovery is tested more
     device.connection_state = ConnectionState::Connected;
     device.active_rail = TransportRail::Lan;
-    device.ip_address = peer.ip;
-    device.port = peer.port;
+    device.ip_address = ip;
+    device.port = port;
     device.latency_ms = 2;
-    devices_[peer.public_key] = device;
+
+    {
+        std::lock_guard<std::mutex> lock(devices_mutex_);
+        devices_[public_key] = device;
+    }
 
     if (store_) {
         try {
             store_->upsert_device(device);
         } catch (const PersistenceException& e) {
             MeshAuditLogger::instance().log(AuditLevel::SecurityWarning, AuditCategory::Connection,
-                                              "Failed to persist discovered device: " + std::string(e.what()));
+                                              "Failed to persist newly-trusted device: " + std::string(e.what()));
         }
     }
 
-    log_event("Discovered and connected to peer: " + peer.device_name + " (" + peer.ip + ":" +
-              std::to_string(peer.port) + ")");
-    MeshAuditLogger::instance().log_udp_beacon_discovered(peer.device_name, peer.ip, peer.port,
-                                                            peer.mesh_name);
+    log_event("Discovery verified, now trusted: " + device_name + " (" + ip + ":" + std::to_string(port) + ")");
+    MeshAuditLogger::instance().log_discovery_verified(device_name, public_key, ip, port);
 }
+
 
 void MeshEngine::log_event(const std::string& message) {
     std::lock_guard<std::mutex> lock(events_mutex_);

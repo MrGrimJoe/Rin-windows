@@ -31,6 +31,8 @@ const char* to_wire_string(PacketType type) {
         case PacketType::Revocation: return "REVOCATION";
         case PacketType::Heartbeat: return "HEARTBEAT";
         case PacketType::Ack: return "ACK";
+        case PacketType::DiscoveryChallenge: return "DISCOVERY_CHALLENGE";
+        case PacketType::DiscoveryResponse: return "DISCOVERY_RESPONSE";
     }
     return "HEARTBEAT";
 }
@@ -47,6 +49,8 @@ std::optional<PacketType> packet_type_from_wire_string(const std::string& s) {
     if (s == "REVOCATION") return PacketType::Revocation;
     if (s == "HEARTBEAT") return PacketType::Heartbeat;
     if (s == "ACK") return PacketType::Ack;
+    if (s == "DISCOVERY_CHALLENGE") return PacketType::DiscoveryChallenge;
+    if (s == "DISCOVERY_RESPONSE") return PacketType::DiscoveryResponse;
     return std::nullopt;
 }
 

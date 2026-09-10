@@ -148,6 +148,37 @@ void MeshAuditLogger::log_udp_beacon_discovered(const std::string& device_name, 
             " (Mesh: " + mesh_name.value_or("any") + ")");
 }
 
+void MeshAuditLogger::log_discovery_beacon_matched(const std::string& host, int port,
+                                                     const std::string& peer_key) {
+    log(AuditLevel::Info, AuditCategory::DiscoveryUdp,
+        "Beacon meshTag matched ours, from " + host + ":" + std::to_string(port), std::nullopt, peer_key);
+}
+
+void MeshAuditLogger::log_discovery_challenge_sent(const std::string& host, int port,
+                                                     const std::string& peer_key) {
+    log(AuditLevel::Handshake, AuditCategory::DiscoveryUdp,
+        "Discovery challenge sent to " + host + ":" + std::to_string(port) +
+            " (proof of mesh-secret possession required before trust)",
+        std::nullopt, peer_key);
+}
+
+void MeshAuditLogger::log_discovery_verified(const std::string& device_name, const std::string& peer_key,
+                                               const std::string& host, int port) {
+    log(AuditLevel::SecuritySuccess, AuditCategory::DiscoveryUdp,
+        "Discovery challenge verified -- '" + device_name + "' at " + host + ":" + std::to_string(port) +
+            " proved mesh-secret possession, now trusted",
+        device_name, peer_key);
+}
+
+void MeshAuditLogger::log_discovery_rejected(const std::string& host, int port,
+                                               const std::optional<std::string>& peer_key,
+                                               const std::string& reason) {
+    log(AuditLevel::SecurityWarning, AuditCategory::DiscoveryUdp,
+        "Discovery challenge/response rejected for " + host + ":" + std::to_string(port) + ": " + reason +
+            " -- peer NOT trusted",
+        std::nullopt, peer_key);
+}
+
 void MeshAuditLogger::log_handshake_initiated(const std::string& target_ip, const std::string& peer_name,
                                                 const std::optional<std::string>& ephemeral_token) {
     std::string token_preview =
