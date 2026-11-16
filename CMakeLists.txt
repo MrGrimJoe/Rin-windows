@@ -165,6 +165,22 @@ else()
     set(HAVE_ZXING FALSE)
 endif()
 
+# --- AMDC-F (chunk compression, opt-in at runtime) ----------------------
+# Pinned to a commit; only the codec sources are built (no AMDC tests/CLIs).
+FetchContent_Declare(
+    amdc
+    GIT_REPOSITORY https://github.com/MrGrimJoe/AMDC.git
+    GIT_TAG        92bd872cc5e31270248d9fc4f1127389284341d7
+)
+FetchContent_GetProperties(amdc)
+if(NOT amdc_POPULATED)
+    FetchContent_Populate(amdc)
+endif()
+find_package(Threads REQUIRED)
+add_library(amdcf STATIC "${amdc_SOURCE_DIR}/src/fast.cpp" "${amdc_SOURCE_DIR}/src/amdcf_c.cpp")
+target_include_directories(amdcf PUBLIC "${amdc_SOURCE_DIR}/src")
+target_link_libraries(amdcf PUBLIC Threads::Threads)
+
 # --- rin_core (static library, cross-platform) -------------------------
 add_library(rin_core STATIC
     src/base64.cpp
@@ -229,6 +245,7 @@ if(WIN32)
     )
 endif()
 
+target_link_libraries(rin_core PUBLIC amdcf)
 target_include_directories(rin_core PUBLIC
     include
     ${QRENCODE_INCLUDE_DIR}

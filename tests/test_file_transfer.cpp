@@ -202,6 +202,64 @@ void run_file_transfer_tests() {
         fs::remove(test_file);
     }
 
+    // -- Compressed transfer: round trip, smaller on the wire, safe on abuse
+    {
+        // 256 KB compressible text-like data + 64 KB pseudo-random (incompressible) tail.
+        std::string test_file = (fs::temp_directory_path() / "rin_ft_test_comp.bin").string();
+        {
+            std::ofstream f(test_file, std::ios::binary);
+            for (size_t i = 0; i < 256 * 1024; ++i) f.put("rin mesh file chunk "[i % 20]);
+            uint32_t x = 12345;
+            for (size_t i = 0; i < 64 * 1024; ++i) { x = x * 1664525u + 1013904223u; f.put(static_cast<char>(x >> 24)); }
+        }
+        std::string received_path;
+        FileTransferEngine receiver(
+            [&](const ReceivedFileRecord& rec) { received_path = rec.local_file_path; },
+            [](const std::string&, int, const MeshPacket&) -> std::optional<int64_t> { return std::nullopt; });
+        std::array<uint8_t, 32> mesh_key =
+            CryptoEngine::derive_mesh_encryption_key(identity.mesh_secret, identity.mesh_name);
+        size_t wire_bytes = 0;
+        FileTransferEngine sender(
+            [](const ReceivedFileRecord&) {},
+            [&](const std::string&, int, const MeshPacket& packet) -> std::optional<int64_t> {
+                std::string plain = CryptoEngine::decrypt_payload(packet.payload, mesh_key);
+                if (packet.type == PacketType::FileChunk) wire_bytes += plain.size();
+                switch (packet.type) {
+                    case PacketType::FileStart: receiver.handle_file_start(plain, packet.sender_key, packet.sender_name); break;
+                    case PacketType::FileChunk: receiver.handle_file_chunk(plain, packet.sender_key); break;
+                    case PacketType::FileComplete: receiver.handle_file_complete(plain, packet.sender_name); break;
+                    default: break;
+                }
+                return int64_t{1};
+            });
+        sender.set_compression_level(2);
+        TrustedDevice t = target;
+        t.public_key = "not_a_real_key_so_ecdh_fails";
+        check(sender.send_file(test_file, t, identity), "compressed send_file() succeeds");
+        check(!received_path.empty(), "compressed transfer is received and saved");
+        if (!received_path.empty() && fs::exists(received_path)) {
+            check(read_file(test_file) == read_file(received_path), "compressed transfer is byte-identical after decode");
+            fs::remove(received_path);
+        }
+        check(wire_bytes < 320 * 1024 * 4 / 3 * 3 / 4, "compressed transfer sends well under the raw chunk bytes");
+        fs::remove(test_file);
+
+        // A compressed chunk for a transfer that did not announce compression must be dropped.
+        bool failed = false;
+        FileTransferEngine strict(
+            [&](const ReceivedFileRecord& rec) { failed = rec.local_file_path.empty(); },
+            [](const std::string&, int, const MeshPacket&) -> std::optional<int64_t> { return std::nullopt; });
+        FileTransferMetadata m;
+        m.file_id = "abuse1"; m.file_name = "abuse.bin"; m.file_size = 65536; m.total_chunks = 1;
+        strict.handle_file_start(m.to_json(), "k", "Attacker");
+        FileChunkPayload c;
+        c.file_id = "abuse1"; c.chunk_index = 0; c.total_chunks = 1;
+        c.data_base64 = base64_encode(std::vector<uint8_t>{1, 2, 3, 4}); c.raw_size = 65536;
+        strict.handle_file_chunk(c.to_json(), "k");
+        strict.handle_file_complete("{\"fileId\":\"abuse1\"}", "Attacker");
+        check(failed, "compressed chunk without announced compression is rejected");
+    }
+
     // -- Downloads directory is created and writable ----------------------
     {
         std::string dir = FileTransferEngine::downloads_directory();

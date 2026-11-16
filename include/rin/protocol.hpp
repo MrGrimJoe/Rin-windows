@@ -111,6 +111,12 @@ struct FileTransferMetadata {
     int total_chunks = 0;
     int chunk_size = 65536;
     std::optional<std::string> sha256_checksum;
+    // Optional extension, absent on the wire unless the sender opted in:
+    // "amdcf1" means individual chunks MAY be AMDC-F compressed (see
+    // FileChunkPayload::raw_size). A receiver that does not know this field
+    // would store compressed bytes and fail the SHA-256 check, so senders
+    // only set it when the peer is known to support it.
+    std::optional<std::string> compression;
 
     std::string to_json() const;
     static std::optional<FileTransferMetadata> from_json(const std::string& json_str);
@@ -121,6 +127,9 @@ struct FileChunkPayload {
     int chunk_index = 0;
     int total_chunks = 0;
     std::string data_base64;
+    // 0 = data is the raw chunk (the only form older peers produce).
+    // >0 = data is AMDC-F compressed and decodes to exactly raw_size bytes.
+    int raw_size = 0;
 
     std::string to_json() const;
     static std::optional<FileChunkPayload> from_json(const std::string& json_str);

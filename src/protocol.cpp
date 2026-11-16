@@ -195,6 +195,9 @@ std::string FileTransferMetadata::to_json() const {
     if (sha256_checksum.has_value()) {
         j["checksum"] = *sha256_checksum;
     }
+    if (compression.has_value()) {
+        j["compression"] = *compression;
+    }
     return j.dump();
 }
 
@@ -210,6 +213,9 @@ std::optional<FileTransferMetadata> FileTransferMetadata::from_json(const std::s
         meta.chunk_size = j.value("chunkSize", 65536);
         if (j.contains("checksum") && !j["checksum"].is_null()) {
             meta.sha256_checksum = j["checksum"].get<std::string>();
+        }
+        if (j.contains("compression") && j["compression"].is_string()) {
+            meta.compression = j["compression"].get<std::string>();
         }
         return meta;
     } catch (const json::exception&) {
@@ -227,6 +233,7 @@ std::string FileChunkPayload::to_json() const {
     j["chunkIndex"] = chunk_index;
     j["totalChunks"] = total_chunks;
     j["data"] = data_base64;
+    if (raw_size > 0) j["rawSize"] = raw_size;
     return j.dump();
 }
 
@@ -238,6 +245,7 @@ std::optional<FileChunkPayload> FileChunkPayload::from_json(const std::string& j
         chunk.chunk_index = j.at("chunkIndex").get<int>();
         chunk.total_chunks = j.at("totalChunks").get<int>();
         chunk.data_base64 = j.at("data").get<std::string>();
+        chunk.raw_size = j.value("rawSize", 0);
         return chunk;
     } catch (const json::exception&) {
         return std::nullopt;
