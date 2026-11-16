@@ -21,7 +21,6 @@
 #include <openssl/evp.h>
 
 #include "rin/audit_logger.hpp"
-#include "amdcf.h"
 #include "rin/crypto.hpp"
 #include "rin/mesh_engine.hpp"
 
@@ -150,7 +149,6 @@ bool FileTransferEngine::send_file(const std::string& local_path, const TrustedD
     meta.total_chunks = total_chunks;
     meta.chunk_size = kFileChunkBytes;
     meta.sha256_checksum = checksum;
-    if (compression_level_ > 0) meta.compression = "amdcf1";
 
     std::string meta_json = meta.to_json();
     std::string enc_meta = CryptoEngine::encrypt_payload(meta_json, enc_key);
@@ -187,17 +185,6 @@ bool FileTransferEngine::send_file(const std::string& local_path, const TrustedD
 
         // Encode raw chunk bytes as base64 before JSON-wrapping.
         std::vector<uint8_t> raw(chunk_buf.begin(), chunk_buf.begin() + bytes_read);
-        int chunk_raw_size = 0;
-        if (compression_level_ > 0 && !raw.empty()) {
-            std::vector<uint8_t> enc(amdcf_page_bound(raw.size()));
-            // max_pct 90: keep the chunk raw unless it saves at least 10%.
-            size_t n = amdcf_page_compress(raw.data(), raw.size(), enc.data(), compression_level_, 90);
-            if (n > 0) {
-                enc.resize(n);
-                raw.swap(enc);
-                chunk_raw_size = static_cast<int>(bytes_read);
-            }
-        }
         std::string chunk_b64 = base64_encode(raw);
 
         FileChunkPayload chunk_payload;
@@ -205,7 +192,6 @@ bool FileTransferEngine::send_file(const std::string& local_path, const TrustedD
         chunk_payload.chunk_index = chunk_idx;
         chunk_payload.total_chunks = total_chunks;
         chunk_payload.data_base64 = chunk_b64;
-        chunk_payload.raw_size = chunk_raw_size;
 
         std::string chunk_json = chunk_payload.to_json();
         std::string enc_chunk = CryptoEngine::encrypt_payload(chunk_json, enc_key);
@@ -322,24 +308,6 @@ void FileTransferEngine::handle_file_chunk(const std::string& plain_json,
     }
 
     std::vector<uint8_t> raw_bytes = base64_decode(chunk->data_base64);
-    if (chunk->raw_size != 0) {
-        // Compressed chunk. Only honoured if FILE_START announced it, and the
-        // size must be sane: never allocate more than one chunk.
-        bool ok = receive->metadata.compression.has_value() && *receive->metadata.compression == "amdcf1" &&
-                  chunk->raw_size > 0 && chunk->raw_size <= kFileChunkBytes;
-        std::vector<uint8_t> out;
-        if (ok) {
-            out.resize(static_cast<size_t>(chunk->raw_size));
-            ok = amdcf_page_decompress(raw_bytes.data(), raw_bytes.size(), out.data(), out.size()) == 1;
-        }
-        if (!ok) {
-            MeshAuditLogger::instance().log(AuditLevel::SecurityWarning, AuditCategory::PacketRouting,
-                                              "Bad compressed chunk " + std::to_string(chunk->chunk_index) +
-                                                  " for file " + chunk->file_id + " -- dropped");
-            return;  // chunk stays missing; FILE_COMPLETE will discard the transfer
-        }
-        raw_bytes.swap(out);
-    }
     int64_t offset = static_cast<int64_t>(chunk->chunk_index) * kFileChunkBytes;
 
     try {

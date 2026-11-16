@@ -60,14 +60,6 @@ public:
                    const MeshIdentity& identity,
                    std::function<void(float, int64_t, int64_t)> on_progress = nullptr);
 
-    // Opt-in AMDC-F compression of outgoing chunks. 0 (default) = off, wire
-    // format identical to before. 1-2 = LZ4-speed levels; 3-8 trade speed for
-    // size. Only enable for peers that understand FileTransferMetadata::
-    // compression (e.g. another Rin build). Chunks that do not shrink are
-    // sent raw. Integrity is still SHA-256 over the original file.
-    void set_compression_level(int level) { compression_level_ = level < 0 ? 0 : (level > 8 ? 8 : level); }
-    int compression_level() const { return compression_level_; }
-
     // -- Receive side (called from MeshEngine::on_packet_received) --------
     void handle_file_start(const std::string& plain_json, const std::string& sender_key,
                             const std::string& sender_name);
@@ -94,7 +86,6 @@ private:
     std::unordered_map<std::string, std::shared_ptr<InFlightReceive>> in_flight_;
 
     std::atomic<int64_t> sequence_{200};
-    int compression_level_ = 0;
 };
 
 }  // namespace rin
