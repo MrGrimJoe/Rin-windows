@@ -162,157 +162,119 @@ support both.
   relay-adjacent networking code, know that these are the two sharp
   edges that bit this one.
 
-**NOT yet verified — needs a real device test:**
-- End-to-end interop against the actual Android app. This environment
-  has no JVM/Android toolchain, so the tests above prove "standard,
-  spec-compliant EC P-256 / AES-GCM / JSON" and "a real QR decoder can
-  read this," not "a Pixel's actual camera, at actual screen distances
-  and lighting, running the actual APK, completes a full join." The
-  `rin_console` and `rin_gui` binaries exist specifically to let you
-  test this by hand.
-- **The Win32 GUI itself is UNCOMPILED on this environment.** This
-  sandbox is Linux with no Windows SDK, so `win32_shell.cpp`/`main_gui.cpp`
-  have been reviewed carefully and written directly against the real
-  Win32 API, but have never actually been run through MSVC or linked
-  against real `user32.lib`/`gdi32.lib`/`comctl32.lib`. Build this on
-  your actual Windows machine first and expect to fix at least minor
-  compile issues — see "Building the GUI on Windows" below for what to
-  watch for.
-- The TCP connect/read timeout behavior under real network conditions
-  (Wi-Fi Direct, different subnets, a phone with mobile data instead of
-  Wi-Fi) — only tested here against localhost/loopback-adjacent conditions.
-- Multi-hop / full-mesh trust propagation (Phase 9 in the roadmap) —
-  this core only implements pairwise join handshakes so far, matching
-  where the Android side currently is.
-- **Camera-based QR scanning does not exist yet.** The GUI can *display*
-  a QR (Add Device button → `show_qr_window`), but joining a mesh from
-  Windows currently means pasting the other device's token JSON as text
-  into a dialog (`run_join_paste_dialog`) rather than pointing a webcam
-  at the phone's QR. See "Next steps" below.
-- **The relay fallback tier's real-world/adversarial behavior.** What's
-  verified is the happy path over loopback (register, forward, deliver,
-  unchanged payload) plus one clean-failure case. NOT yet exercised:
-  behavior over an actual internet path (latency, partial reads,
-  reconnect-storms if a relay flaps); a hostile or overloaded relay
-  server (the reference `rin_relay` has no auth beyond "knows a public
-  key," no rate limiting, and no TLS — see the trust-model comment at
-  the top of `relay_server.cpp`); and interop with an Android-side relay
-  client, which does not exist yet (the Android app has no relay
-  fallback of its own — see the wire protocol note in `relay.hpp` for
-  why this doesn't affect the message format itself).
+**NOT yet verified — needs a real device test** (see
+[`docs/FIELD_TEST.md`](docs/FIELD_TEST.md)):
+- End-to-end interop against the actual Android app. The tests prove
+  "standard, spec-compliant EC P-256 / AES-GCM / JSON", "a real QR decoder
+  can read this PC's QR", and "two engines in one process complete a join
+  over real loopback TCP" — not "a Pixel's camera, at real distances and
+  lighting, running the real APK, completes a full join".
+- TCP connect/read timeout behavior under real network conditions
+  (Wi-Fi Direct, different subnets, a phone on mobile data).
+- Multi-hop / full-mesh trust propagation (Phase 9 in the roadmap) — only
+  pairwise join handshakes exist so far, matching the Android side.
+- The relay fallback over a real internet path, and against a hostile or
+  overloaded relay (`rin_relay` has no auth beyond "knows a public key", no
+  rate limiting, no TLS — see the trust-model comment in `relay_server.cpp`).
+  The Android app has a relay client (`RelayClient.kt`, same register/forward
+  wire protocol), but nothing in the Android app ever calls
+  `configureRelay()` and there is no setting for it, so on a phone the relay
+  tier is unreachable today.
 
-## Building the GUI on Windows
+## Pairing flow (how a join actually works today)
 
-`rin_gui` is a separate CMake target, only built when `WIN32` is true.
-On your actual Windows box:
+1. The **host** shows a token: mesh name, public key, device name, an
+   ephemeral token, the mesh secret, TCP port, and its **LAN IP**
+   (`detect_local_lan_ip()`; override with `RIN_ADVERTISE_IP`). The Windows
+   GUI renders it as a QR; the console's `token` prints the JSON. Without
+   the IP a scanning phone has nothing to reach the host by — Android falls
+   back to the INTERNET_P2P rail when `hostIp` is absent.
+2. The **joiner** scans/pastes it, adopts the host's mesh **secret and
+   name**, and sends a signed `JOIN_ACCEPT` to the host's address. The name
+   matters as much as the secret: it is the HKDF salt in
+   `derive_mesh_encryption_key`, so a joiner that keeps its own name derives
+   a different mesh key than the host and nothing mesh-key-encrypted
+   decrypts. (Windows previously never adopted the name; Android did so only
+   on first launch. Both fixed.)
+3. Windows only ever plays the **host** in this flow for phones — it
+   generates QR codes and never scans them. Joining *another* device's mesh
+   from this PC is a manual paste of that device's token JSON.
 
-```
-cmake -B build -DCMAKE_TOOLCHAIN_FILE=<vcpkg>/scripts/buildsystems/vcpkg.cmake
-cmake --build build --target rin_gui
-```
+**Known gaps in the pairing flow (verified by a real loopback run, not
+just by reading the code):**
+- **`JOIN_ACCEPT` is dropped by the host with an ECDH decryption failure.**
+  The packet is targeted at the host's key, so the receiver tries the
+  per-peer ECDH session key, but the joiner encrypted it with the mesh key.
+  The signature verifies, the decrypt fails, the packet is discarded, and
+  the audit log shows a `[ERROR] DECRYPTION_ECDH` line on every otherwise
+  successful join. Android's receive path has the same shape.
+- Consequently **the host never adds the joiner to its trusted devices from
+  the join itself.** Reverse trust only arrives via UDP beacon discovery +
+  the challenge/response handshake, so it needs both devices on the same
+  broadcast domain; a join across subnets or via relay only is one-way until
+  that happens.
+- The ephemeral token in the QR is never checked by the host (it would be
+  inside the dropped `JOIN_ACCEPT` anyway). The mesh secret in the QR is the
+  actual credential: anyone who photographs the QR can join.
 
-You'll need `openssl`, `nlohmann-json`, and `libqrencode` installed via
-vcpkg (`vcpkg install openssl nlohmann-json libqrencode`). Things worth
-double-checking on first compile, since none of this has been run
-through MSVC yet:
-- `#pragma comment(lib, "comctl32.lib")` in `win32_shell.cpp` plus the
-  explicit `comctl32` link in CMakeLists — MSVC usually only needs one
-  of these, having both should be harmless but is untested.
-- The manifest requirement for Common Controls v6 (ListView, themed
-  buttons) — modern Windows usually resolves this automatically, but if
-  `rin_gui` shows unthemed/classic controls, you likely need an
-  application manifest requesting `comctl32.dll` version 6.
-- `CreateDIBSection`'s top-down DIB (`biHeight = -height`) plus a 32bpp
-  BGRA buffer — this is standard and should be fine, but hasn't been
-  visually confirmed against a real display yet.
+Fixing the first two together is the natural next protocol change: have the
+host decrypt `JOIN_ACCEPT` with the mesh key, check the ephemeral token it
+issued, and trust the joiner immediately. It needs both platforms to change
+in lockstep.
 
 ## Current GUI capabilities
 
-- First launch: a Yes/No chooser (Create vs. Join a mesh) — currently a
-  `MessageBoxW`, not a polished dialog. Functionally matches doc §02's
-  "two choices only," visually it's a placeholder.
-- Main window: a `ListView` showing the live device list (name,
-  platform, connection state, address), an Add Device button, and a
-  Remove Selected button, refreshed once per second via a timer (see
-  the comment in `win32_shell.cpp` on why polling instead of pushing
-  from transport threads).
-- Add Device: renders the local join token as a real QR code (via
-  `qr_code.hpp`/`libqrencode`) in a popup window, blitted with
-  `BitBlt`/`CreateDIBSection`.
-- Join (the other device's side, today): a small paste-a-token-JSON
-  dialog, since camera-based scanning isn't built yet.
-- Remove: calls `MeshEngine::revoke_device`, which signs and broadcasts
-  a revocation packet before dropping the local trust entry — matches
-  doc §02/§07.
+- First launch: a Yes/No chooser (Create vs. Join a mesh) — a
+  `MessageBoxW`, not a polished dialog. Join means pasting the other
+  device's token JSON.
+- Main window: a `ListView` of live devices (name, platform, connection
+  state, address), refreshed once per second; Add Device and Remove
+  Selected buttons; minimize-to-tray with a right-click menu.
+- Add Device: renders this PC's join token as a QR (`qr_code.hpp` /
+  libqrencode, blitted with `BitBlt`/`CreateDIBSection`) for a phone to scan.
+- Remove: `MeshEngine::revoke_device` signs and broadcasts a revocation
+  before dropping the local trust entry.
+- Received clipboard text → `SetClipboardData`; received URLs →
+  `ShellExecute` (URL-validated); received files → `Downloads\Rin Downloads`,
+  SHA-256 verified.
+- Identity and trusted devices persist in SQLite at `%APPDATA%\Rin\mesh.db`
+  (override with `RIN_DB_PATH`). The GUI and CI installer are built by
+  `.github/workflows/build.yml`.
 
-## Known compromises in this milestone
+## Known compromises
 
-- **No Win32 clipboard/browser/file integration yet.** `on_packet_received`
-  in `mesh_engine.cpp` logs these events but doesn't act on them (no
-  `SetClipboardData`, no `ShellExecute`). Deliberately deferred until the
-  core handshake proves out against a real phone — see the `TODO` comments
-  at the relevant switch cases.
-- **Auto-trust on UDP discovery -- FIXED.** See "Discovery hardening"
-  below. `on_peer_discovered` used to add any peer broadcasting the same
-  mesh name straight into the trusted-devices map; it now only refreshes
-  an already-trusted device's connection info, and new trust requires
-  proving mesh-secret possession via a challenge/response handshake.
 - **New TCP connection per packet, synchronous send.** Matches Android's
-  current behavior exactly (simple, not fast). Fine for control traffic
-  and clipboard sync; will need a persistent-connection or streaming path
-  before file transfer throughput matters (Phase 7+).
+  current behavior (simple, not fast). Fine for control traffic and
+  clipboard; file transfer is chunked on top of it.
+- **`TcpTransport::send_packet` refuses `127.0.0.1`** by design (Android
+  ignores loopback peers too). Same-machine experiments need another
+  loopback address such as `127.0.0.2`.
 - **Legacy mesh-key fallback is not a real secret.** `derive_mesh_encryption_key`
   falls back to `SHA-256(mesh_name)` when no `meshSecret` is supplied, for
-  compatibility with any mesh created before the mesh-secret fix. Mesh
-  name is shown on-screen and in the QR payload, so this path provides no
-  real confidentiality — it exists only so old and new installs can still
-  talk, not as a security boundary. See the loud comment in `crypto.hpp`.
+  compatibility with meshes created before the mesh-secret fix. See the loud
+  comment in `crypto.hpp`.
+- **Stale challenge entries never expire** (`pending_challenges_`); a peer
+  that never replies just won't be re-challenged until restart.
+- **Cleartext Wi-Fi-Direct HELLO / BLE mesh hash on Android** are outside
+  this core and still leak mesh metadata on those rails.
 
 ## Testing this against your phone
 
-1. Build: `cmake -B build && cmake --build build`
-2. Run tests first: `./build/tests/rin_tests` — should print `ALL TESTS PASSED.`
-3. Run `./build/rin_console`, create a mesh, run `token`, copy the JSON.
-4. On the phone, add `"hostIp":"<this PC's LAN IP>"` to that JSON (the
-   real QR flow embeds this automatically once camera/QR UI exists on
-   Windows — see "Next steps" below) and feed it into whatever the
-   Android app's join path expects.
-5. Alternatively, let UDP discovery do the work: both devices on the same
-   LAN/Wi-Fi, same mesh name, should show up in each other's `devices`
-   list within ~6 seconds without manually exchanging tokens — though
-   note the auto-trust caveat above means this isn't actually testing
-   the QR security boundary, just connectivity.
+See [`docs/FIELD_TEST.md`](docs/FIELD_TEST.md).
 
-## Suggested next steps (not built yet)
+## Suggested next steps
 
-- Camera-based QR **scanning** to replace `run_join_paste_dialog`'s
-  copy-paste flow — capture a frame (e.g. via Media Foundation or an
-  OpenCV `VideoCapture`), decode with ZXing (already a test dependency;
-  promoting it to a runtime `rin_core` dependency for this is
-  reasonable), and feed the result into `MeshEngine::complete_join_handshake`
-  the same way the pasted-JSON path does today.
-- Replace the `MessageBoxW` first-launch chooser and the hand-built
-  paste dialog with proper `.rc`-based dialog templates for correct
-  modal behavior, tab order, and visual polish.
-- Wire up `on_packet_received`'s clipboard/browser-handoff cases to
-  actual Win32 APIs.
-- BLE and Wi-Fi Direct rails (currently LAN/TCP + UDP discovery + the
-  new opt-in relay fallback — see `relay.hpp`). Realistically these two
-  are Android-only concepts; Windows' practical ceiling is LAN + relay,
-  which is now in place, rather than trying to replicate Wi-Fi Direct
-  group formation on a platform with no equivalent API.
-- An Android-side relay client speaking the same register/forward
-  protocol as `relay.hpp`/`relay_server.cpp`, so the relay fallback
-  actually helps cross-platform, not just Windows-to-Windows.
-- Harden `rin_relay` before pointing it at anything but your own
-  devices: TLS, real client authentication (right now "knowing a public
-  key" is sufficient to register as that key — see the trust-model
-  comment in `relay_server.cpp`), and rate limiting.
-- Persist identity/trusted-devices to disk — DONE (`persistence.cpp`,
-  SQLite-backed, covered by `test_persistence.cpp`). This note is being
-  left here crossed out rather than deleted since the GUI's first-launch
-  chooser still has an open bug around re-firing on every run (see the
-  comment in `Win32Shell::run()`) — the underlying storage works, the
-  GUI's use of it on startup is what still needs the follow-up.
-- System tray icon / minimize-to-tray, since a background mesh app
-  shouldn't need a visible window at all times once this is polished.
+- Run the field test; record real behavior.
+- Android: a setting (and a call to `configureRelay()`) so the relay tier can
+  actually be turned on; a GUI/console control for URL handoff from the PC.
+- Host-side `JOIN_ACCEPT` handling (decrypt with the mesh key, verify the
+  ephemeral token, trust immediately) — coordinated with Android.
+- A phone-scans-PC pairing flow that lets the PC join an *existing* phone
+  mesh without pasting JSON (needs a protocol addition: the QR owner is the
+  one being added, so the phone must hand the mesh credentials over under
+  the PC's public key).
+- Proper `.rc` dialog templates to replace the `MessageBoxW` chooser and the
+  hand-built paste dialog.
+- Harden `rin_relay` before pointing it at anything but your own devices:
+  TLS, real client authentication, rate limiting.
+- Enable the ZXing QR round-trip test in CI (`zxing-cpp` via vcpkg).

@@ -6,8 +6,9 @@ one else's server in the middle.**
 Rin syncs clipboard text, hands off URLs, and transfers files directly
 between your own devices over your LAN (with an opt-in relay fallback for
 when they're not on the same network), end-to-end encrypted the whole way.
-This is the Windows C++ core + console shell, wire-compatible with the
-Android app at [github.com/MrGrimJoe/Rin-android-](https://github.com/MrGrimJoe/Rin-android-).
+This is the Windows C++ core, a console shell, and a Win32 GUI (tray app with
+a device list and QR display), wire-compatible with the Android app at
+[github.com/MrGrimJoe/Rin-android-](https://github.com/MrGrimJoe/Rin-android-).
 
 [![Build status](https://github.com/MrGrimJoe/Rin-windows/actions/workflows/build.yml/badge.svg)](https://github.com/MrGrimJoe/Rin-windows/actions/workflows/build.yml)
 [![License: MrMIB v1.0](https://img.shields.io/badge/license-MrMIB%20v1.0-blue)](LICENSE)
@@ -20,8 +21,10 @@ Android app at [github.com/MrGrimJoe/Rin-android-](https://github.com/MrGrimJoe/
   whole way.
 - **URL handoff** — push a link from one device to open on another.
 - **File transfer** — chunked, checksummed, streamed peer-to-peer.
-- **QR-based pairing** — join a mesh by scanning/pasting a token, no
-  account, no server-side signup.
+- **QR-based pairing** — this PC shows a QR code (which carries its LAN
+  address, mesh name and secret) and a phone running Rin scans it. Windows
+  only generates QR codes; it never scans them. No account, no server-side
+  signup.
 - **Opt-in relay fallback** — devices with no direct LAN path to each other
   can still reach each other through a relay you point them at (your own,
   or none at all — nothing is configured by default). The relay only ever
@@ -49,13 +52,13 @@ for the actual protocol writeup, and what's verified versus merely assumed.
 
 ## Status
 
-CI (above) builds the release binary, runs the full test suite, and
-compiles the Windows installer on every push — that's genuinely green,
-not aspirational. What CI *can't* tell you: this hasn't yet been run
-against a real Android device over a real network, so cross-platform
-discovery and the relay path are implemented and unit-tested on paper,
-not field-verified yet. If you try it against the Android app, feedback
-on what actually happens is welcome.
+CI builds the Release binaries, runs the full test suite, and compiles the
+Windows installer on every push. That is green as of the latest runs.
+What CI *can't* tell you: this hasn't yet been run against a real Android
+device over a real network, so cross-platform discovery, pairing and the
+relay path are implemented and tested on loopback, not field-verified.
+[`docs/FIELD_TEST.md`](docs/FIELD_TEST.md) is the checklist for doing that,
+and the place to record what actually happens.
 
 ## Get it
 
@@ -67,19 +70,20 @@ been published. Otherwise, build from source below.
 
 ## Build
 
-Requires: CMake 3.16+, a C++17 compiler, OpenSSL dev headers,
-nlohmann-json dev headers. Standalone Asio is vendored under
-`third_party/asio/`.
+Requires: CMake 3.20+, a C++17 compiler, OpenSSL and libqrencode dev
+packages. Asio, nlohmann-json and (on Windows) the SQLite amalgamation are
+downloaded by CMake at configure time, so the first configure needs network
+access.
 
 ```
 cmake -B build
 cmake --build build -j
 ```
 
-On Windows with MSVC/vcpkg, install `openssl` and `nlohmann-json` via
-vcpkg and pass `-DCMAKE_TOOLCHAIN_FILE=<vcpkg>/scripts/buildsystems/vcpkg.cmake`
-to the configure step; the CMakeLists already handles `WIN32` linking
-against `ws2_32`/`wsock32`.
+On Windows with MSVC/vcpkg, install `openssl` and `libqrencode` via vcpkg
+and pass `-DCMAKE_TOOLCHAIN_FILE=<vcpkg>/scripts/buildsystems/vcpkg.cmake`.
+CI uses the `x64-windows-static` triplet with the static CRT so the exe is
+fully self-contained (see `.github/workflows/build.yml`).
 
 ## Run tests
 
@@ -87,37 +91,49 @@ against `ws2_32`/`wsock32`.
 ./build/tests/rin_tests
 ```
 
-Should print `ALL TESTS PASSED.` — covers crypto round-trips, fail-closed
-behavior (tampered/wrong-key rejection), discovery-tag/challenge-response
-primitives (including a real two-party loopback round trip), wire-format
-field names, and the relay fallback path.
+Should end with `ALL TESTS PASSED.` — covers crypto round-trips, fail-closed
+behavior (tampered/wrong-key rejection), the wire format's field names,
+QR generation, SQLite persistence, chunked file transfer, the relay
+fallback, and the discovery/trust-boundary handshake (including a real
+two-party loopback round trip and join-token contents).
 
-## Run the console milestone
+Tests point `RIN_DB_PATH` at a temp file, so running them never overwrites
+the identity of a Rin install on the same machine. If libzxing is
+installed (`libzxing-dev` on Linux, `zxing-cpp` in vcpkg), one extra test
+decodes the generated QR with an independent decoder; without it that one
+test is skipped. ZXing is test-only — it is not linked into the app.
+
+## Run the console
 
 ```
-./build/rin_console
+./build/rin-console
 ```
 
-Creates a mesh identity, starts the TCP listener (port 45990, auto-
-incrementing) and UDP discovery beacon (port 45991), and drops into a
-command prompt. Type `help` for commands. To use a relay fallback, set
+Creates (or loads) a mesh identity, starts the TCP listener (port 45990,
+auto-incrementing) and UDP discovery beacon (port 45991), and drops into a
+command prompt. Type `help` for commands (`token`, `join`, `devices`,
+`events`, `clipboard`, `sendfile`). To use a relay fallback, set
 `RIN_RELAY_HOST` (and optionally `RIN_RELAY_PORT`, default 45992) before
-launching — there's no in-console command for it, it's read once at
-startup. See `DESIGN_NOTES.md` for how to test this against a real phone.
+launching.
+
+Environment variables: `RIN_ADVERTISE_IP` (LAN address to put in the join
+token if auto-detection picks the wrong adapter, e.g. VPN/WSL/Hyper-V),
+`RIN_DB_PATH` (use a different database file than `%APPDATA%\Rin\mesh.db`).
 
 ## Run the Win32 GUI (Windows only)
 
 ```
-cmake --build build --target rin_gui
-./build/rin_gui.exe
+cmake --build build --config Release --target RinWindows
+build\Release\RinWindows.exe
 ```
 
-Shows the actual doc-described UI: a device list, Add Device (renders a
-real scannable QR code), and Remove Selected. Camera-based QR *scanning*
-isn't built yet — joining from Windows currently means pasting the other
-device's token JSON into a small dialog. See `DESIGN_NOTES.md` for build
-requirements and what's untested (this has never been compiled with a
-real Windows SDK/MSVC — only reviewed against the Win32 API directly).
+A tray app: device list, **Add Device** (shows this PC's join QR for a phone
+to scan), **Remove Selected** (signed revocation), minimize-to-tray, and a
+Windows installer built by CI (`installer.iss`). Received clipboard text is
+written to the Windows clipboard, handed-off URLs open in the default
+browser, and received files land in `Downloads\Rin Downloads`. Joining
+*another* device's mesh from this PC is a manual paste of that device's
+token JSON (first-launch "Join" option, or the console's `join` command).
 
 ## Run your own relay (optional)
 
@@ -134,12 +150,12 @@ identical to not having it.
 ## Layout
 
 ```
-include/rin/       Public headers (protocol, crypto, transport, mesh_engine,
-                    relay, qr_code, win32_shell)
-src/                Implementation
-tests/              Crypto, protocol, QR, discovery, and relay tests
-third_party/asio/   Vendored standalone Asio (headers only)
-DESIGN_NOTES.md     Design decisions, verified vs. assumed, known gaps
+include/rin/       Public headers
+src/               Implementation (core, console, Win32 shell)
+tests/             Test suites, one binary (rin_tests)
+docs/              FIELD_TEST.md — real-device test checklist
+DESIGN_NOTES.md    Design decisions, verified vs. assumed, known gaps
+installer.iss      Inno Setup script (compiled by CI)
 ```
 
 ## The Android side
