@@ -6,7 +6,6 @@
 #include <string>
 
 #include "rin/mesh_engine.hpp"
-#include "rin/camera_qr_scanner.hpp"
 
 namespace rin {
 
@@ -51,8 +50,6 @@ private:
     HWND         list_view_   = nullptr;
     HWND         qr_hwnd_     = nullptr;
     HBITMAP      qr_bitmap_   = nullptr;
-
-    std::unique_ptr<CameraQrScanner> camera_scanner_;
 
     static constexpr UINT kPollTimerId = 1;
 };

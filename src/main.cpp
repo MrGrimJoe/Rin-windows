@@ -19,11 +19,12 @@ namespace {
 
 void print_help() {
     std::cout << "\nCommands:\n"
-              << "  token              Print this device's QR join token JSON\n"
-              << "                     (paste this as text on the phone's join screen,\n"
-              << "                     or generate a QR from it, until the real QR UI exists)\n"
-              << "  join <json>        Complete a join handshake using a token JSON string\n"
-              << "                     (paste what the phone's \"Add Device\" screen shows)\n"
+              << "  token              Print this device's join token JSON (includes this\n"
+              << "                     PC's LAN IP; set RIN_ADVERTISE_IP to override it).\n"
+              << "                     The Rin GUI shows the same token as a QR for phones.\n"
+              << "  join <json>        Complete a join handshake using another device's token\n"
+              << "                     JSON (this PC joins THAT device's mesh and adopts its\n"
+              << "                     name and secret). Windows never scans QR codes.\n"
               << "  devices            List currently known devices\n"
               << "  events             Show recent mesh events\n"
               << "  clipboard <text>   Broadcast text to the mesh as a clipboard sync\n"
@@ -141,9 +142,10 @@ int main() {
                 continue;
             }
             if (!token->host_ip.has_value()) {
-                std::cout << "Warning: token has no hostIp. This build requires a hostIp until\n"
-                          << "the QR camera/scan UI and address-resolution-via-beacon path exist.\n"
-                          << "Add \"hostIp\":\"<phone's LAN IP>\" to the token JSON and retry.\n";
+                std::cout << "Token has no hostIp, so there is no address to send the join to.\n"
+                          << "Ask the other device to re-generate its token on a network (a Windows\n"
+                          << "host can set RIN_ADVERTISE_IP), or add \"hostIp\":\"<its LAN IP>\" to the\n"
+                          << "token JSON by hand and retry.\n";
                 continue;
             }
             bool ok = engine.complete_join_handshake(*token);

@@ -7,7 +7,6 @@
 #include <shellapi.h>
 
 #include "rin/win32_shell.hpp"
-#include "rin/camera_qr_scanner.hpp"
 #include "rin/qr_code.hpp"
 
 #pragma comment(lib, "comctl32.lib")
@@ -116,7 +115,6 @@ HBITMAP qr_to_hbitmap(const std::string& json, int scale) {
 // -----------------------------------------------------------------------
 Win32Shell::Win32Shell(MeshEngine& engine)
     : engine_(engine)
-    , camera_scanner_(std::make_unique<CameraQrScanner>())
 {
     g_shell = this;
     WM_TASKBARCREATED = RegisterWindowMessageW(L"TaskbarCreated");
@@ -162,7 +160,6 @@ int Win32Shell::run(HINSTANCE instance) {
         DispatchMessage(&msg);
     }
 
-    camera_scanner_->stop();
     KillTimer(main_hwnd_, kPollTimerId);
     return (int)msg.wParam;
 }
@@ -186,48 +183,12 @@ bool Win32Shell::run_first_launch_chooser() {
         return true;
     }
 
-    // Join path: try camera first, fall back to paste dialog.
+    // Join path. Windows only GENERATES QR codes; it never scans them
+    // (phones are the only side that both scans and generates). Joining an
+    // existing mesh from this PC is therefore a manual paste of the other
+    // device's token JSON until a phone-scans-PC pairing flow replaces it.
     std::string token_json;
-    bool got_token = false;
-
-    // Show a "scanning…" message while we try the camera.
-    MessageBoxW(nullptr,
-        L"Point the camera at the Rin QR code shown on your other device.\n"
-        L"Click OK to open the scanner, or Cancel to enter the token manually.",
-        kAppName, MB_OKCANCEL | MB_ICONINFORMATION);
-
-    // Camera scanner result arrives on a background thread; we use a simple
-    // blocking wait via a local message loop for the first-launch case.
-    bool camera_done = false;
-    bool camera_ok   = camera_scanner_->start([&](const std::string& decoded) {
-        token_json   = decoded;
-        got_token    = true;
-        camera_done  = true;
-        PostMessageW(nullptr, WM_APP + 10, 0, 0);   // wake the local loop below
-    });
-
-    if (camera_ok) {
-        // Tiny modal loop: pump messages until the camera fires or the user
-        // presses a key / closes a notional cancel button.
-        HWND wait_dlg = CreateWindowExW(0, L"STATIC",
-            L"Scanning for QR code — press Escape to cancel",
-            WS_POPUP | WS_BORDER | WS_VISIBLE,
-            CW_USEDEFAULT, CW_USEDEFAULT, 340, 60,
-            nullptr, nullptr, instance_, nullptr);
-
-        MSG msg;
-        while (!camera_done && GetMessage(&msg, nullptr, 0, 0)) {
-            if (msg.message == WM_KEYDOWN && msg.wParam == VK_ESCAPE) break;
-            if (msg.message == WM_APP + 10) { camera_done = true; break; }
-            TranslateMessage(&msg);
-            DispatchMessage(&msg);
-        }
-        if (wait_dlg) DestroyWindow(wait_dlg);
-        camera_scanner_->stop();
-    }
-
-    // Fall back to paste dialog if camera wasn't available or scan was cancelled.
-    if (!got_token) got_token = run_join_paste_dialog(nullptr, token_json);
+    bool got_token = run_join_paste_dialog(nullptr, token_json);
 
     if (!got_token || token_json.empty()) {
         // Still no token -- create a placeholder mesh so the app isn't
@@ -343,21 +304,13 @@ void Win32Shell::refresh_device_list() {
 }
 
 // -----------------------------------------------------------------------
-// Add Device flow (QR display + camera scan)
+// Add Device flow (QR display only -- Windows never scans)
 // -----------------------------------------------------------------------
 void Win32Shell::on_add_device_clicked() {
-    // Show this device's QR so another device can scan it.
+    // Show this device's QR so a phone running Rin can scan it. This is
+    // the whole flow on the Windows side: the phone scans, adopts this
+    // mesh, and sends its JOIN_ACCEPT to the address embedded in the QR.
     show_qr_window();
-
-    // Simultaneously start scanning for the other device's QR, in case they
-    // clicked "Add Device" too and are showing their own QR.
-    if (!camera_scanner_->is_running()) {
-        camera_scanner_->start([this](const std::string& decoded) {
-            // Fired on a background thread -- PostMessage to reach the UI thread.
-            std::string* heap = new std::string(decoded);
-            PostMessageW(main_hwnd_, WM_APP + 20, 0, (LPARAM)heap);
-        });
-    }
 }
 
 void Win32Shell::show_qr_window() {
@@ -391,7 +344,7 @@ void Win32Shell::show_qr_window() {
         main_hwnd_, nullptr, instance_, nullptr);
 
     CreateWindowExW(0, L"STATIC",
-        L"Scan this on your other device's Rin app",
+        L"Scan this with the Rin app on your phone",
         WS_CHILD | WS_VISIBLE | SS_CENTER,
         10, binfo.bmHeight + 16, ww - 20, 30,
         qr_hwnd_, nullptr, instance_, nullptr);
@@ -422,7 +375,7 @@ void Win32Shell::on_remove_device_clicked() {
 }
 
 // -----------------------------------------------------------------------
-// Join via paste (fallback when camera is unavailable)
+// Join via paste (manual path -- Windows does not scan QR codes)
 // -----------------------------------------------------------------------
 bool Win32Shell::run_join_paste_dialog(HWND parent, std::string& out_json) {
     static std::string* s_result = nullptr;
@@ -582,25 +535,6 @@ LRESULT Win32Shell::handle_main(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         return 0;
 
-    // Camera decoder result arrives on a background thread; it posted
-    // WM_APP+20 with a heap-allocated std::string as LPARAM.
-    case WM_APP + 20: {
-        auto* decoded = reinterpret_cast<std::string*>(lp);
-        if (decoded) {
-            auto token = QrJoinToken::from_json(*decoded);
-            if (token.has_value()) {
-                engine_.complete_join_handshake(*token);
-                if (qr_hwnd_) { DestroyWindow(qr_hwnd_); qr_hwnd_ = nullptr; }
-                MessageBoxW(hwnd, L"Joined successfully!", kAppName, MB_ICONINFORMATION);
-            } else {
-                MessageBoxW(hwnd, L"Scanned QR is not a valid Rin join token.",
-                            kAppName, MB_ICONWARNING);
-            }
-            delete decoded;
-        }
-        return 0;
-    }
-
     case WM_CLOSE:
         // Minimise to tray instead of quitting.
         ShowWindow(hwnd, SW_HIDE);
@@ -634,7 +568,6 @@ LRESULT Win32Shell::handle_qr(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_CLOSE:
-        camera_scanner_->stop();
         DestroyWindow(hwnd);
         qr_hwnd_ = nullptr;
         return 0;

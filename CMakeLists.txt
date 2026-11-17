@@ -19,23 +19,14 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # command line. Only takes effect on MSVC; harmless elsewhere.
 if(MSVC)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
-    add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/EHsc>)
-
     # Every .cpp in this tree throws/catches C++ exceptions (CryptoException,
-    # RAII cleanup of OpenSSL handles, MeshAuditLogger's try/catch, etc.), but
-    # nothing was ever telling MSVC to use the synchronous C++ exception
-    # model. Without /EHsc, MSVC assumes extern "C" functions (OpenSSL,
-    # sqlite3.c, asio's C internals) can't throw and omits proper unwind
-    # info around calls into them -- so the FIRST exception thrown or
-    # caught near one of those calls corrupts the stack instead of
-    # unwinding it cleanly. This is exactly why every single translation
-    # unit was emitting "warning C4530: C++ exception handler used, but
-    # unwind semantics are not enabled" in the build log, and exactly why
-    # rin_tests crashed with 0xc0000409 (STATUS_STACK_BUFFER_OVERRUN) right
-    # after CryptoEngine::verify()'s try/catch around EVP_DigestVerifyFinal
-    # -- a real Windows/MSVC codegen problem that plain GCC/libstdc++ on
-    # Linux has no equivalent failure mode for, which is why the identical
-    # code and inputs never crash under ASan/UBSan off-platform.
+    # RAII cleanup of OpenSSL handles, MeshAuditLogger's try/catch, etc.).
+    # /EHsc selects the standard synchronous C++ exception model and assumes
+    # extern "C" functions (OpenSSL, sqlite3.c, asio internals) don't throw;
+    # without it MSVC warns C4530 on every translation unit and emits
+    # incomplete unwind info. Correct and required for this codebase on MSVC,
+    # but NOT what caused the old rin_tests 0xc0000409 (see the note above the
+    # RIN_ENABLE_ASAN option below).
     # $<COMPILE_LANGUAGE:CXX> keeps this off sqlite3.c (compiled as C).
     add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/EHsc>)
 endif()
@@ -150,21 +141,6 @@ if(NOT QRENCODE_INCLUDE_DIR OR NOT QRENCODE_LIBRARY)
         "  Windows: vcpkg install libqrencode")
 endif()
 
-# --- ZXing (decode only, used in tests + camera scanner on Windows) ---
-# ZXing is required at runtime only on Windows (camera QR scanner).
-# On Linux/macOS it is used only in the test suite. Either way we link
-# it the same way -- a single find_library call works for both.
-find_path(ZXING_INCLUDE_DIR ZXing/ReadBarcode.h)
-find_library(ZXING_LIBRARY NAMES ZXing)
-if(ZXING_INCLUDE_DIR AND ZXING_LIBRARY)
-    message(STATUS "Found ZXing: ${ZXING_LIBRARY}")
-    set(HAVE_ZXING TRUE)
-else()
-    message(STATUS "ZXing not found -- camera QR scanner disabled; "
-                   "install libzxing-dev to enable it.")
-    set(HAVE_ZXING FALSE)
-endif()
-
 # --- rin_core (static library, cross-platform) -------------------------
 add_library(rin_core STATIC
     src/base64.cpp
@@ -179,54 +155,21 @@ add_library(rin_core STATIC
     src/relay.cpp
 )
 
-# Diagnostic-only: the rin_tests binary crashes with 0xc0000409
-# (STATUS_STACK_BUFFER_OVERRUN) on real Windows, and two separate manual
-# code-review passes over the whole obvious call chain (crypto.cpp,
-# audit_logger.cpp, mesh_engine.hpp) turned up nothing -- /GS only checks
-# the stack cookie at function RETURN, so the actual overwrite could be
-# happening in code that ran (and passed its own assertions) earlier.
-# AddressSanitizer catches this class of bug with a precise stack trace
-# instead of more guessing. Off by default (adds overhead, needs the ASan
-# runtime) -- opt in with -DRIN_ENABLE_ASAN=ON.
+# Diagnostic-only. History worth keeping: rin_tests once died with
+# 0xc0000409 (STATUS_STACK_BUFFER_OVERRUN) on Windows CI and was chased as
+# memory corruption (CRT mismatch, /EHsc, ASan, /RTC1). It wasn't. UCRT also
+# reports abort()/std::terminate() as 0xc0000409, and the real cause was an
+# uncaught std::filesystem_error from remove()-ing a SQLite file while the
+# test still held it open (fixed in tests/test_persistence.cpp, CI run 42).
+# stdout was lost in the crash because it was fully buffered when piped, which
+# made the log point at the wrong suite. If a crash like that ever recurs:
+# check tests/test_protocol.cpp's std::set_terminate handler output first.
+# AddressSanitizer is still available for genuine memory bugs; off by default
+# (adds overhead, needs the ASan runtime) -- opt in with -DRIN_ENABLE_ASAN=ON.
 option(RIN_ENABLE_ASAN "Build with MSVC AddressSanitizer (diagnostic use only)" OFF)
 if(RIN_ENABLE_ASAN AND MSVC)
     target_compile_options(rin_core PUBLIC /fsanitize=address)
     target_link_options(rin_core PUBLIC /fsanitize=address)
-endif()
-
-# camera_qr_scanner.cpp's #ifdef _WIN32 block #includes <ZXing/ReadBarcode.h>
-# unconditionally, with no RIN_HAVE_ZXING guard around the include itself
-# (only the surrounding logic was meant to be conditional, per the
-# ZXing-not-found message above already promising "camera QR scanner
-# disabled" -- the source list just never actually enforced that). Nothing
-# else in the codebase references CameraQrScanner, confirmed, so leaving it
-# out entirely when ZXing isn't available can't cause a link error --
-# it's simply not compiled in, matching what CMake already claims happens.
-# camera_qr_scanner.cpp now has a real ZXing-optional fallback internally
-# (see the file itself) rather than needing to be excluded wholesale --
-# excluding it broke win32_shell.cpp's link instead (LNK2019, 4 unresolved
-# externals), since it directly constructs/calls CameraQrScanner regardless
-# of ZXing's availability. Missed checking win32_shell.cpp specifically
-# when this was first written -- only grepped main_gui/main/mesh_engine.
-if(WIN32)
-    target_sources(rin_core PRIVATE src/camera_qr_scanner.cpp)
-    # C++/WinRT coroutines -- camera_qr_scanner.cpp is the only WinRT
-    # coroutine consumer in the codebase (confirmed, nothing else uses
-    # WinRT), so this only applies to that one file rather than forcing
-    # the deprecated-coroutine machinery onto the whole target. The newer
-    # MSVC toolset on GitHub's windows-latest runner hard-rejects
-    # <experimental/coroutine> with a static_assert (C2338/STL1011) unless
-    # the silence define is set -- Microsoft's own documented escape
-    # hatch, not a real fix. A full migration to std::coroutine (C++20)
-    # would be the real fix, but that's an actual code change to the
-    # WinRT async logic, not something to improvise here. Needed
-    # regardless of ZXing's availability -- MediaCapture/MediaFrameReader
-    # are WinRT-coroutine-based either way, only the decode step itself
-    # needs ZXing.
-    set_source_files_properties(src/camera_qr_scanner.cpp PROPERTIES
-        COMPILE_OPTIONS "/await"
-        COMPILE_DEFINITIONS "_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS"
-    )
 endif()
 
 target_include_directories(rin_core PUBLIC
@@ -238,12 +181,6 @@ target_compile_definitions(rin_core PUBLIC
     ASIO_STANDALONE
     ASIO_NO_DEPRECATED
 )
-
-if(HAVE_ZXING)
-    target_include_directories(rin_core PUBLIC ${ZXING_INCLUDE_DIR})
-    target_link_libraries(rin_core PUBLIC ${ZXING_LIBRARY})
-    target_compile_definitions(rin_core PUBLIC RIN_HAVE_ZXING)
-endif()
 
 target_link_libraries(rin_core PUBLIC
     asio_headers
@@ -257,8 +194,6 @@ target_link_libraries(rin_core PUBLIC
 if(WIN32)
     target_link_libraries(rin_core PUBLIC
         ws2_32 wsock32 shell32 ole32
-        # WinRT for camera scanner (Windows.Media.Capture.Frames)
-        windowsapp
     )
 endif()
 
