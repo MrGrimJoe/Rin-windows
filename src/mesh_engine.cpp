@@ -228,6 +228,11 @@ std::string MeshEngine::build_join_token_json() const {
     token.ephemeral_token = CryptoEngine::generate_ephemeral_token();
     token.mesh_secret = identity_.mesh_secret;
     token.host_port = identity_.port;
+    // Without this the scanning device has no address to reach us at and
+    // falls back to a non-LAN rail (Android's completeJoinHandshake picks
+    // INTERNET_P2P when hostIp is absent), so the JOIN_ACCEPT is never
+    // delivered. Omitted (not faked) when no LAN address can be found.
+    token.host_ip = detect_local_lan_ip();
     token.timestamp_ms = now_millis();
     return token.to_json();
 }
@@ -281,20 +286,34 @@ bool MeshEngine::complete_join_handshake(const QrJoinToken& token) {
         }
     }
 
-    // Adopt the mesh secret carried in the token, matching Android's
-    // completeJoinHandshake -- this is the ONLY place a mesh secret should
-    // ever travel, inside the QR-bootstrapped token.
+    // Adopt the mesh secret AND name carried in the token. This is the ONLY
+    // place a mesh secret should ever travel, inside the QR-bootstrapped
+    // token. The name matters as much as the secret: it is the HKDF salt in
+    // derive_mesh_encryption_key, so a joiner that keeps its own placeholder
+    // name (e.g. "Joining...") derives a DIFFERENT mesh key than the host and
+    // every mesh-key packet (clipboard, discovery challenge, beacon tag) fails
+    // to decrypt/match.
     std::string active_secret = identity_.mesh_secret;
+    bool mesh_changed = false;
     if (token.mesh_secret.has_value() && !token.mesh_secret->empty() &&
         token.mesh_secret != identity_.mesh_secret) {
         identity_.mesh_secret = *token.mesh_secret;
         active_secret = *token.mesh_secret;
+        mesh_changed = true;
+    }
+    if (!token.mesh_name.empty() && token.mesh_name != identity_.mesh_name) {
+        identity_.mesh_name = token.mesh_name;
+        mesh_changed = true;
+    }
+    if (mesh_changed) {
+        // Beacons started before this join are still tagged for the old mesh.
+        udp_.set_mesh_key(CryptoEngine::derive_mesh_encryption_key(identity_.mesh_secret, identity_.mesh_name));
         if (store_) {
             try {
                 store_->save_identity(identity_);
             } catch (const PersistenceException& e) {
                 MeshAuditLogger::instance().log(AuditLevel::SecurityWarning, AuditCategory::Connection,
-                                                  "Failed to persist updated mesh secret: " + std::string(e.what()));
+                                                  "Failed to persist adopted mesh name/secret: " + std::string(e.what()));
             }
         }
     }

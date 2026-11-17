@@ -3,6 +3,7 @@
 #include <nlohmann/json.hpp>
 
 #include <chrono>
+#include <cstdlib>
 #include <iostream>
 
 #include "rin/audit_logger.hpp"
@@ -34,6 +35,46 @@ std::string read_line(tcp::socket& socket) {
     return line;
 }
 }  // namespace
+
+
+std::optional<std::string> detect_local_lan_ip() {
+    std::string forced;
+#ifdef _WIN32
+    {
+        char* buf = nullptr;
+        size_t len = 0;
+        if (_dupenv_s(&buf, &len, "RIN_ADVERTISE_IP") == 0 && buf) {
+            forced = buf;
+            free(buf);
+        }
+    }
+#else
+    if (const char* env = std::getenv("RIN_ADVERTISE_IP")) forced = env;
+#endif
+    if (!forced.empty()) {
+        asio::error_code ec;
+        auto addr = asio::ip::make_address_v4(forced, ec);
+        if (!ec) return addr.to_string();
+        // A malformed override is ignored rather than trusted -- fall through to detection.
+    }
+
+    // "Connect" a UDP socket toward a public address and read back which
+    // local address the OS chose. No packet is ever sent -- connect() on a
+    // datagram socket only selects a route -- so this works offline-ish and
+    // doesn't touch the network. The route's source address is by
+    // construction the adapter a peer on that network can reach.
+    try {
+        asio::io_context io;
+        asio::ip::udp::socket sock(io);
+        sock.open(asio::ip::udp::v4());
+        sock.connect(asio::ip::udp::endpoint(asio::ip::make_address_v4("192.0.2.1"), 9));
+        auto local = sock.local_endpoint().address().to_v4();
+        if (local.is_loopback() || local.is_unspecified()) return std::nullopt;
+        return local.to_string();
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+}
 
 // =======================================================================
 // TcpTransport
@@ -237,7 +278,7 @@ UdpBeacon::~UdpBeacon() { stop(); }
 void UdpBeacon::start(const std::array<uint8_t, 32>& mesh_key, const std::string& public_key,
                        int tcp_port, const std::string& stun_ip, int stun_port,
                        PeerDiscoveredHandler on_peer) {
-    mesh_key_ = mesh_key;
+    set_mesh_key(mesh_key);
     public_key_ = public_key;
     tcp_port_ = tcp_port;
     stun_ip_ = stun_ip;
@@ -257,6 +298,11 @@ void UdpBeacon::start(const std::array<uint8_t, 32>& mesh_key, const std::string
 
     listen_thread_ = std::thread([this] { listen_loop(); });
     broadcast_thread_ = std::thread([this] { broadcast_loop(); });
+}
+
+void UdpBeacon::set_mesh_key(const std::array<uint8_t, 32>& mesh_key) {
+    std::lock_guard<std::mutex> lock(mesh_key_mutex_);
+    mesh_key_ = mesh_key;
 }
 
 void UdpBeacon::stop() {
@@ -319,7 +365,12 @@ void UdpBeacon::broadcast_loop() {
     while (running_) {
         try {
             int64_t bucket = now_millis() / 1000 / kBeaconTagWindowSeconds;
-            std::string mesh_tag = CryptoEngine::derive_beacon_tag(mesh_key_, bucket);
+            std::array<uint8_t, 32> key_copy;
+            {
+                std::lock_guard<std::mutex> lock(mesh_key_mutex_);
+                key_copy = mesh_key_;
+            }
+            std::string mesh_tag = CryptoEngine::derive_beacon_tag(key_copy, bucket);
 
             json j;
             j["magic"] = "RIN_BEACON";

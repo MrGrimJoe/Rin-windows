@@ -9,7 +9,9 @@
 
 #include "rin/protocol.hpp"
 
+#include <cstdlib>
 #include <exception>
+#include <filesystem>
 #include <iostream>
 
 #ifdef _WIN32
@@ -183,6 +185,11 @@ int g_relay_test_failures();
 int g_discovery_test_failures();
 
 int main() {
+    // Unbuffered stdout: when piped (CI, ctest) stdout is fully buffered, so a
+    // crash discards everything printed since the last flush and the log ends
+    // at an unrelated earlier test. Costs nothing at this output volume.
+    std::cout << std::unitbuf;
+
     // run 39's rtc-debug log crashed with a bare "abort() has been
     // called" -- that exact text is printed by the CRT for ANY abort()
     // call (RTC failure, raw abort(), or std::terminate() on an
@@ -228,6 +235,21 @@ int main() {
     // for hard crashes (unhandled SEH / access violations), same reason.
     SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
 #endif
+
+    // create_initial_mesh() persists to PersistenceStore::default_db_path().
+    // Point that at a throwaway file so running the suite on a machine that
+    // also runs Rin never overwrites the real identity in %APPDATA%\\Rin.
+    {
+        std::filesystem::path test_db =
+            std::filesystem::temp_directory_path() / "rin_tests_default_identity.db";
+        std::error_code ec;
+        std::filesystem::remove(test_db, ec);
+#ifdef _WIN32
+        _putenv_s("RIN_DB_PATH", test_db.string().c_str());
+#else
+        setenv("RIN_DB_PATH", test_db.string().c_str(), 1);
+#endif
+    }
 
     run_crypto_tests();
     run_protocol_tests();

@@ -287,6 +287,23 @@ std::vector<TrustedDevice> PersistenceStore::load_all_devices() {
 void PersistenceStore::clear_all_devices() { exec_or_throw(db_, "DELETE FROM trusted_devices;"); }
 
 std::string PersistenceStore::default_db_path() {
+    // RIN_DB_PATH overrides the location entirely. The test suite sets it to a
+    // temp file so running rin_tests never overwrites the identity of a Rin
+    // install on the same machine (create_initial_mesh persists to this path).
+    {
+        std::string forced;
+#ifdef _WIN32
+        char* buf = nullptr;
+        size_t len = 0;
+        if (_dupenv_s(&buf, &len, "RIN_DB_PATH") == 0 && buf) {
+            forced = buf;
+            free(buf);
+        }
+#else
+        if (const char* env = std::getenv("RIN_DB_PATH")) forced = env;
+#endif
+        if (!forced.empty()) return forced;
+    }
 #ifdef _WIN32
     PWSTR path_wide = nullptr;
     if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_RoamingAppData, 0, nullptr, &path_wide))) {

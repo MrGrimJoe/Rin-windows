@@ -49,6 +49,8 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 
@@ -77,6 +79,15 @@ struct DiscoveredPeer {
     int stun_port = 0;          // 0 if the sender didn't include one
     int64_t timestamp_ms = 0;
 };
+
+// Best guess at this machine's LAN IPv4 address, for embedding in the QR
+// join token (a phone that scans the token has nothing else to reach us
+// by until a beacon arrives). RIN_ADVERTISE_IP overrides detection -- set
+// it on machines with VPN / WSL / Hyper-V adapters where the default
+// route's adapter isn't the one the phone can reach. Returns nullopt if
+// no usable address was found (no network); callers should then omit
+// hostIp from the token rather than invent one.
+std::optional<std::string> detect_local_lan_ip();
 
 // Callback invoked for every fully-received, signature-verified packet,
 // along with the remote IP it arrived from (empty for relay-delivered
@@ -146,6 +157,13 @@ public:
                PeerDiscoveredHandler on_peer);
     void stop();
 
+    // Swaps the key used to compute this device's rotating meshTag. Needed
+    // when the mesh secret/name change AFTER start() (joining another mesh
+    // from the console `join` command): without it the beacon keeps
+    // broadcasting a tag for the old mesh and the host never matches us.
+    // Safe to call from any thread, running or not.
+    void set_mesh_key(const std::array<uint8_t, 32>& mesh_key);
+
 private:
     void listen_loop();
     void broadcast_loop();
@@ -153,6 +171,7 @@ private:
     asio::io_context& io_;
     asio::ip::udp::socket socket_;
     std::atomic<bool> running_{false};
+    mutable std::mutex mesh_key_mutex_;
     std::array<uint8_t, 32> mesh_key_{};
     std::string public_key_;
     int tcp_port_ = kDefaultTcpPort;

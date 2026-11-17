@@ -30,6 +30,7 @@
 #include <nlohmann/json.hpp>
 
 #include <asio.hpp>
+#include <cstdlib>
 #include <iostream>
 #include <thread>
 
@@ -62,6 +63,22 @@ int64_t current_bucket() {
                   std::chrono::system_clock::now().time_since_epoch())
                   .count();
     return ms / 1000 / kBeaconTagWindowSeconds;
+}
+
+void set_env(const char* name, const char* value) {
+#ifdef _WIN32
+    _putenv_s(name, value);
+#else
+    setenv(name, value, 1);
+#endif
+}
+
+void clear_env(const char* name) {
+#ifdef _WIN32
+    _putenv_s(name, "");
+#else
+    unsetenv(name);
+#endif
 }
 }  // namespace
 
@@ -307,6 +324,68 @@ void run_discovery_tests() {
             check(promoted.has_value() && promoted->name == "The Other Device",
                   "a full real round-trip (real challenge sent -> decrypted -> real response with "
                   "correctly-echoed nonce) promotes the other device to trusted");
+        }
+    }
+
+    // -- QR join token must carry a reachable host address -----------------
+    // The phone that scans this device's QR has nothing else to reach it by:
+    // Android's completeJoinHandshake picks the INTERNET_P2P rail when hostIp
+    // is missing, and the JOIN_ACCEPT then goes nowhere.
+    {
+        set_env("RIN_ADVERTISE_IP", "192.168.77.20");
+        auto forced = detect_local_lan_ip();
+        check(forced.has_value() && *forced == "192.168.77.20",
+              "RIN_ADVERTISE_IP overrides LAN IP detection");
+
+        auto token = QrJoinToken::from_json(engine.build_join_token_json());
+        check(token.has_value(), "the join token JSON parses back");
+        check(token.has_value() && token->host_ip.has_value() && *token->host_ip == "192.168.77.20",
+              "the join token embeds the host's LAN IP so a scanning phone can reach it");
+        check(token.has_value() && token->host_port == engine.identity().port,
+              "the join token embeds the real listening port");
+
+        set_env("RIN_ADVERTISE_IP", "not-an-ip");
+        auto bad = detect_local_lan_ip();
+        check(!bad.has_value() || *bad != "not-an-ip",
+              "a malformed RIN_ADVERTISE_IP is ignored, never advertised");
+
+        clear_env("RIN_ADVERTISE_IP");
+        auto detected = detect_local_lan_ip();
+        bool plausible = !detected.has_value() ||
+                         (asio::ip::make_address_v4(*detected).is_loopback() == false &&
+                          asio::ip::make_address_v4(*detected).is_unspecified() == false);
+        check(plausible, "auto-detected LAN IP (if any) is neither loopback nor 0.0.0.0");
+    }
+
+    // -- Joining must adopt the host's mesh NAME as well as its secret -----
+    // The name is the HKDF salt in derive_mesh_encryption_key. A joiner that
+    // keeps its own placeholder name derives a different mesh key than the
+    // host, so everything encrypted with the mesh key silently fails.
+    {
+        set_env("RIN_ADVERTISE_IP", "127.0.0.1");
+        asio::io_context joiner_io;
+        MeshEngine joiner(joiner_io);
+        joiner.create_initial_mesh("Joining...", "Joiner Phone");
+        auto host_token = QrJoinToken::from_json(engine.build_join_token_json());
+        clear_env("RIN_ADVERTISE_IP");
+
+        check(host_token.has_value(), "host token parses for the join-adoption test");
+        if (host_token.has_value()) {
+            // No listener is running at the token's address, so the send is
+            // expected to fail -- adoption happens before the send and is
+            // exactly what's under test here.
+            host_token->host_port = 1;
+            joiner.complete_join_handshake(*host_token);
+
+            check(joiner.identity().mesh_name == engine.identity().mesh_name,
+                  "joiner adopts the host's mesh name, not its own placeholder");
+            check(joiner.identity().mesh_secret == engine.identity().mesh_secret,
+                  "joiner adopts the host's mesh secret");
+            check(CryptoEngine::derive_mesh_encryption_key(joiner.identity().mesh_secret,
+                                                           joiner.identity().mesh_name) ==
+                      CryptoEngine::derive_mesh_encryption_key(engine.identity().mesh_secret,
+                                                               engine.identity().mesh_name),
+                  "after joining, both devices derive the identical mesh key");
         }
     }
 
